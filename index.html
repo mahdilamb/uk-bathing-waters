@@ -238,7 +238,7 @@
 
 <header>
   <h1>🏖️ UK Bathing Waters</h1>
-  <p>Find designated bathing sites within cycling or train distance</p>
+  <p>Find designated bathing sites reachable on foot, by bike or by train</p>
 </header>
 
 <div class="controls">
@@ -251,10 +251,11 @@
   </div>
 
   <div class="cg">
-    <label>Travel Mode</label>
+    <label>Travel Mode <span style="font-weight:400;text-transform:none;letter-spacing:0">(pick any)</span></label>
     <div class="pills">
-      <button class="pill on" data-mode="cycling">🚲 Cycling</button>
-      <button class="pill"    data-mode="train">🚂 Train</button>
+      <button class="pill"     data-mode="walking">🚶 Walking</button>
+      <button class="pill on"  data-mode="cycling">🚲 Cycling</button>
+      <button class="pill"     data-mode="train">🚂 Train</button>
     </div>
   </div>
 
@@ -267,7 +268,7 @@
   </div>
 
   <button class="btn-search" id="searchBtn">Search →</button>
-  <span class="note">🚲 Cycling uses real road routing · 🚂 Train is a straight-line estimate</span>
+  <span class="note">🚶🚲 Road-routed via OSRM · 🚂 Train is a straight-line estimate</span>
 </div>
 
 <div class="main">
@@ -290,21 +291,25 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors | Bathing water data © Environment Agency'
 }).addTo(map);
 
-// ── State ────────────────────────────────────────────────────────────────────
-let allSites   = [];
-let sitesReady = false;
-let userLL     = null;
-let mode       = 'cycling';
-let hours      = 1.5;
-let markers    = [];
-let userPin    = null;
-let ring       = null;
-let activeCard = null;
-
-// Crow-flies speed proxy for train (no free UK rail routing API)
-const TRAIN_KMH = 52;
-// OSRM public routing API — used for cycling
+// ── Mode config ───────────────────────────────────────────────────────────────
+// osrmProfile: null = crow-flies estimate only; estKmh used for buffer & fallback
+const MODES = {
+  walking: { label: 'Walking', emoji: '🚶', osrmProfile: 'foot',    estKmh:  5, routed: true  },
+  cycling: { label: 'Cycling', emoji: '🚲', osrmProfile: 'cycling', estKmh: 13, routed: true  },
+  train:   { label: 'Train',   emoji: '🚂', osrmProfile: null,      estKmh: 52, routed: false },
+};
 const OSRM = 'https://router.project-osrm.org';
+
+// ── State ────────────────────────────────────────────────────────────────────
+let allSites      = [];
+let sitesReady    = false;
+let userLL        = null;
+let selectedModes = new Set(['cycling']); // multi-select
+let hours         = 1.5;
+let markers       = [];
+let userPin       = null;
+let ring          = null;
+let activeCard    = null;
 
 // ── Load bundled bathing water data (464 EA-designated sites, England) ───────
 async function loadSites() {
@@ -334,21 +339,18 @@ function distKm(a, b) {
   return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1-x));
 }
 
-// ── OSRM cycling durations (Table API) ───────────────────────────────────────
-// Returns duration in seconds for each destination, or null on failure.
-async function osrmCyclingTimes(origin, destinations) {
-  // Build coordinate string: origin first, then destinations
+// ── OSRM Table API ───────────────────────────────────────────────────────────
+// Returns duration in seconds for each destination (null = unreachable).
+async function osrmTimes(profile, origin, destinations) {
   const coords = [[origin.lng, origin.lat], ...destinations.map(d => [d.lng, d.lat])]
     .map(([lng, lat]) => `${lng},${lat}`)
     .join(';');
-
-  const url = `${OSRM}/table/v1/cycling/${coords}?sources=0&annotations=duration`;
+  const url = `${OSRM}/table/v1/${profile}/${coords}?sources=0&annotations=duration`;
   const res = await fetch(url);
-  if (!res.ok) throw new Error('OSRM table request failed');
+  if (!res.ok) throw new Error(`OSRM ${profile} table failed`);
   const json = await res.json();
   if (json.code !== 'Ok') throw new Error('OSRM: ' + json.message);
-  // durations[0] is source→source (0), [1..] are source→destinations
-  return json.durations[0].slice(1); // seconds, null if unreachable
+  return json.durations[0].slice(1); // skip [0] which is source→source = 0
 }
 
 function fmtMins(secs) {
@@ -385,8 +387,8 @@ function badgeCls(c) {
 }
 
 // ── Render ───────────────────────────────────────────────────────────────────
-// sites: array with .name .lat .lng .classification .dist .travelSecs (optional)
-function render(sites, radiusKm, timed) {
+// sites: [{name, lat, lng, classification, dist, modeTimes: {walking:secs, cycling:secs, …}}]
+function render(sites) {
   markers.forEach(m => map.removeLayer(m));
   markers = [];
   if (ring) { map.removeLayer(ring); ring = null; }
@@ -396,14 +398,6 @@ function render(sites, radiusKm, timed) {
   const count = document.getElementById('resCount');
   const sub   = document.getElementById('resSub');
 
-  if (radiusKm) {
-    ring = L.circle([userLL.lat, userLL.lng], {
-      radius: radiusKm * 1000,
-      color:'#005f8e', fillColor:'#005f8e',
-      fillOpacity:.05, weight:1.5, dashArray:'6 4'
-    }).addTo(map);
-  }
-
   if (!sites.length) {
     count.textContent = 'No results';
     sub.textContent   = 'Try a longer time or different mode';
@@ -411,10 +405,9 @@ function render(sites, radiusKm, timed) {
     return;
   }
 
-  const modeLabel = mode === 'cycling' ? '🚲 cycling' : '🚂 train (est.)';
-  count.textContent = sites.length + ' bathing site' + (sites.length>1?'s':'') + ' found';
-  sub.textContent   = hours + ' hr ' + modeLabel +
-    (timed ? '' : ' · straight-line estimate');
+  const modeNames = [...selectedModes].map(m => MODES[m].emoji + ' ' + MODES[m].label).join(', ');
+  count.textContent = sites.length + ' bathing site' + (sites.length !== 1 ? 's' : '') + ' found';
+  sub.textContent   = hours + ' hr · ' + modeNames;
 
   list.innerHTML = '';
   const bounds = [[userLL.lat, userLL.lng]];
@@ -422,23 +415,31 @@ function render(sites, radiusKm, timed) {
   sites.forEach(site => {
     bounds.push([site.lat, site.lng]);
 
-    const timeStr = site.travelSecs != null
-      ? fmtMins(site.travelSecs)
-      : '~' + Math.round(site.dist / TRAIN_KMH * 60) + ' min';
+    // Build per-mode time chips for the card (only selected modes)
+    const modeChips = [...selectedModes].map(mKey => {
+      const cfg = MODES[mKey];
+      const secs = site.modeTimes[mKey];
+      return cfg.emoji + ' ' + (secs != null ? fmtMins(secs) : cfg.routed ? '—' : '~' + Math.round(site.dist / cfg.estKmh * 60) + ' min');
+    }).join(' &nbsp;·&nbsp; ');
+
+    // Best time for popup
+    const bestMode = [...selectedModes].reduce((best, mKey) => {
+      const secs = site.modeTimes[mKey] ?? (site.dist / MODES[mKey].estKmh * 3600);
+      return secs < best.secs ? { mKey, secs } : best;
+    }, { mKey: null, secs: Infinity });
 
     const distStr = '~' + site.dist.toFixed(1) + ' km';
 
-    // Map marker
     const mk = L.marker([site.lat, site.lng], { icon: dotIcon(site.classification) })
       .addTo(map)
       .bindPopup(
         '<strong>' + esc(site.name) + '</strong>' +
         '<br>Quality: ' + site.classification +
-        '<br>' + distStr + ' · ' + timeStr + ' ' + mode
+        '<br>' + distStr +
+        (bestMode.mKey ? ' · ' + MODES[bestMode.mKey].emoji + ' ' + fmtMins(bestMode.secs) : '')
       );
     markers.push(mk);
 
-    // Sidebar card
     const card = document.createElement('div');
     card.className = 'card';
     card.innerHTML =
@@ -446,7 +447,7 @@ function render(sites, radiusKm, timed) {
       '<div class="card-meta">' +
         '<span class="badge ' + badgeCls(site.classification) + '">' + site.classification + '</span>' +
         '<span>' + distStr + '</span>' +
-        '<span>' + timeStr + '</span>' +
+        '<span style="margin-left:auto">' + modeChips + '</span>' +
       '</div>';
 
     card.addEventListener('click', () => {
@@ -490,46 +491,61 @@ async function search() {
       sitesReady = true;
     }
 
-    if (mode === 'cycling') {
-      // ── Cycling: real road times via OSRM ──────────────────────────────────
-      // Pre-filter with a 2× crow-flies buffer to limit OSRM destinations
-      const maxSecs  = hours * 3600;
-      const bufferKm = (hours * TRAIN_KMH) * 1.5; // generous buffer
-      const candidates = allSites
-        .map(s => ({ ...s, dist: distKm(userLL, s) }))
-        .filter(s => s.dist <= bufferKm);
+    const maxSecs = hours * 3600;
 
-      setStatus('Getting cycling times for ' + candidates.length + ' candidates…');
+    // Buffer = largest crow-flies reach across all selected modes (×1.6 for routing detours)
+    const bufferKm = Math.max(...[...selectedModes].map(m => MODES[m].estKmh * hours)) * 1.6;
+    const candidates = allSites
+      .map(s => ({ ...s, dist: distKm(userLL, s) }))
+      .filter(s => s.dist <= bufferKm);
 
-      let nearby;
+    // Run all selected modes in parallel
+    const routedModes  = [...selectedModes].filter(m => MODES[m].routed);
+    const estimateModes = [...selectedModes].filter(m => !MODES[m].routed);
+
+    setStatus('Routing ' + [...selectedModes].map(m => MODES[m].emoji).join('') +
+      ' for ' + candidates.length + ' candidates…');
+
+    // OSRM calls in parallel; fall back to estimates on failure
+    const osrmResults = await Promise.all(routedModes.map(async mKey => {
       try {
-        const durations = await osrmCyclingTimes(userLL, candidates);
-        nearby = candidates
-          .map((s, i) => ({ ...s, travelSecs: durations[i] }))
-          .filter(s => s.travelSecs != null && s.travelSecs <= maxSecs)
-          .sort((a, b) => a.travelSecs - b.travelSecs);
-      } catch (osrmErr) {
-        // OSRM unavailable — fall back to crow-flies with a warning
-        console.warn('OSRM unavailable, falling back to estimates:', osrmErr);
-        const fallbackKm = hours * 13;
-        nearby = candidates
-          .filter(s => s.dist <= fallbackKm)
-          .sort((a, b) => a.dist - b.dist);
+        const durations = await osrmTimes(MODES[mKey].osrmProfile, userLL, candidates);
+        return { mKey, durations, ok: true };
+      } catch(e) {
+        console.warn('OSRM fallback for', mKey, e);
+        return { mKey, durations: null, ok: false };
+      }
+    }));
+
+    // Build modeTimes per candidate
+    const withTimes = candidates.map((site, i) => {
+      const modeTimes = {};
+
+      for (const { mKey, durations, ok } of osrmResults) {
+        modeTimes[mKey] = ok && durations[i] != null ? durations[i] : null;
+        // Fallback estimate if OSRM failed
+        if (modeTimes[mKey] == null && !MODES[mKey].routed === false) {
+          modeTimes[mKey] = site.dist / MODES[mKey].estKmh * 3600;
+        }
+      }
+      for (const mKey of estimateModes) {
+        modeTimes[mKey] = site.dist / MODES[mKey].estKmh * 3600;
       }
 
-      render(nearby, bufferKm, true);
+      // Best time across selected modes
+      const bestSecs = Math.min(...[...selectedModes].map(m =>
+        modeTimes[m] != null ? modeTimes[m] : Infinity
+      ));
 
-    } else {
-      // ── Train: crow-flies estimate (no free UK rail routing API) ───────────
-      setStatus('Filtering…');
-      const radiusKm = TRAIN_KMH * hours;
-      const nearby = allSites
-        .map(s => ({ ...s, dist: distKm(userLL, s) }))
-        .filter(s => s.dist <= radiusKm)
-        .sort((a, b) => a.dist - b.dist);
+      return { ...site, modeTimes, bestSecs };
+    });
 
-      render(nearby, radiusKm, false);
-    }
+    // Keep sites reachable by at least one selected mode within the time limit
+    const nearby = withTimes
+      .filter(s => s.bestSecs <= maxSecs)
+      .sort((a, b) => a.bestSecs - b.bestSecs);
+
+    render(nearby);
   } catch(e) {
     document.getElementById('resList').innerHTML =
       '<div class="state-box"><span>❌</span><span>' + esc(e.message) + '</span></div>';
@@ -580,9 +596,17 @@ document.getElementById('locateBtn').addEventListener('click', () => {
 
 document.querySelectorAll('.pill').forEach(p => {
   p.addEventListener('click', () => {
-    document.querySelectorAll('.pill').forEach(x => x.classList.remove('on'));
-    p.classList.add('on');
-    mode = p.dataset.mode;
+    const mKey = p.dataset.mode;
+    if (selectedModes.has(mKey)) {
+      // Don't allow deselecting the last mode
+      if (selectedModes.size > 1) {
+        selectedModes.delete(mKey);
+        p.classList.remove('on');
+      }
+    } else {
+      selectedModes.add(mKey);
+      p.classList.add('on');
+    }
   });
 });
 
