@@ -805,7 +805,7 @@ document.getElementById('locateBtn').addEventListener('click', () => {
   );
 });
 
-document.querySelectorAll('.pill').forEach(p => {
+document.querySelectorAll('.pill[data-mode]').forEach(p => {
   p.addEventListener('click', () => {
     const mKey = p.dataset.mode;
     if (selectedModes.has(mKey)) {
