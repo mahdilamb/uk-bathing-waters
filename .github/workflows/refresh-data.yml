@@ -98,21 +98,6 @@ jobs:
                             "c": sepa_cls(p.get("class_description","")), "t": "CoastalBathingWater", "s": "SEPA"})
           print(f"  {sum(1 for s in sites if s['s']=='SEPA')} sites")
 
-          # ── Northern Ireland: DAERA ──────────────────────────────────────────
-          print("Northern Ireland (DAERA)…", flush=True)
-          ni = fetch(
-              "https://opendata-daerani.hub.arcgis.com/api/download/v1/items/"
-              "aeda40124d52464eb347aa93db64b3d8/geojson?layers=0",
-              "DAERA"
-          )
-          for f in ni["features"]:
-              p = f["properties"]; name = p.get("Name","").strip()
-              lng, lat = p.get("centroidX"), p.get("centroidY")
-              if not name or not lat or not lng: continue
-              sites.append({"n": name, "lat": round(float(lat),6), "lng": round(float(lng),6),
-                            "c": "Unknown", "t": "CoastalBathingWater", "s": "DAERA"})
-          print(f"  {sum(1 for s in sites if s['s']=='DAERA')} sites")
-
           print(f"Total: {len(sites)} sites")
           with open("sites.json", "w") as f:
               json.dump(sites, f, separators=(",", ":"))
