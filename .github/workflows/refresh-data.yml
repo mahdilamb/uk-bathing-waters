@@ -1,0 +1,104 @@
+name: Refresh bathing water data
+
+on:
+  schedule:
+    # Every Monday at 06:00 UTC — classifications update through the swim season
+    - cron: '0 6 * * 1'
+  workflow_dispatch: # allow manual trigger
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch latest EA bathing water data
+        run: |
+          python3 - << 'EOF'
+          import urllib.request, json, time, sys
+
+          sites = []
+          url = "https://environment.data.gov.uk/doc/bathing-water.json?_pageSize=50"
+          page = 0
+
+          while url:
+              print(f"Fetching page {page}…", flush=True)
+              req = urllib.request.Request(url, headers={"User-Agent": "uk-bathing-waters-ci/1.0"})
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      data = json.loads(r.read())
+              except Exception as e:
+                  print(f"ERROR on page {page}: {e}", file=sys.stderr)
+                  sys.exit(1)
+
+              for item in data["result"]["items"]:
+                  sp = item.get("samplingPoint", {})
+                  lat = sp.get("lat")
+                  lng = sp.get("long")
+                  if not lat or not lng:
+                      continue
+
+                  name = item.get("name", {})
+                  if isinstance(name, dict):
+                      name = name.get("_value", "")
+
+                  cls_obj = item.get("latestComplianceAssessment", {})
+                  cls = "Unknown"
+                  if isinstance(cls_obj, dict):
+                      c = cls_obj.get("complianceClassification", {})
+                      if isinstance(c, dict):
+                          cls = c.get("name", {}).get("_value", "Unknown")
+
+                  bw_type = item.get("type", [])
+                  bw_type = [t.split("/")[-1] for t in bw_type if isinstance(t, str) and "/" in t]
+                  specific = [t for t in bw_type if t != "BathingWater"]
+                  bw_type = specific[0] if specific else "BathingWater"
+
+                  sites.append({"n": name, "lat": lat, "lng": lng, "c": cls, "t": bw_type})
+
+              nxt = data["result"].get("next")
+              url = nxt if nxt else None
+              page += 1
+              time.sleep(0.3)
+
+          print(f"Fetched {len(sites)} sites")
+
+          with open("sites.json", "w") as f:
+              json.dump(sites, f, separators=(",", ":"))
+
+          EOF
+
+      - name: Check for changes
+        id: diff
+        run: |
+          if git diff --quiet sites.json; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+            COUNT=$(python3 -c "import json; d=json.load(open('sites.json')); print(len(d))")
+            echo "count=$COUNT" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create pull request
+        if: steps.diff.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore: refresh bathing water data (${{ steps.diff.outputs.count }} sites)"
+          branch: data/refresh-${{ github.run_id }}
+          title: "🏖️ Refresh bathing water data — ${{ steps.diff.outputs.count }} sites"
+          body: |
+            Automated refresh of `sites.json` from the Environment Agency linked data API.
+
+            - **Sites:** ${{ steps.diff.outputs.count }}
+            - **Source:** https://environment.data.gov.uk/doc/bathing-water.json
+            - **Triggered by:** scheduled run
+
+            Please review any classification changes before merging.
+          labels: data-refresh
+          delete-branch: true

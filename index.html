@@ -267,7 +267,7 @@
   </div>
 
   <button class="btn-search" id="searchBtn">Search →</button>
-  <span class="note">⚠ Distances are straight-line estimates — real travel times will vary</span>
+  <span class="note">🚲 Cycling uses real road routing · 🚂 Train is a straight-line estimate</span>
 </div>
 
 <div class="main">
@@ -301,8 +301,10 @@ let userPin    = null;
 let ring       = null;
 let activeCard = null;
 
-// Conservative crow-flies speed proxies (km/h)
-const KMH = { cycling: 13, train: 52 };
+// Crow-flies speed proxy for train (no free UK rail routing API)
+const TRAIN_KMH = 52;
+// OSRM public routing API — used for cycling
+const OSRM = 'https://router.project-osrm.org';
 
 // ── Load bundled bathing water data (464 EA-designated sites, England) ───────
 async function loadSites() {
@@ -330,6 +332,29 @@ function distKm(a, b) {
   const x = Math.sin(dLat/2)**2 +
     Math.cos(a.lat*rad)*Math.cos(b.lat*rad)*Math.sin(dLng/2)**2;
   return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1-x));
+}
+
+// ── OSRM cycling durations (Table API) ───────────────────────────────────────
+// Returns duration in seconds for each destination, or null on failure.
+async function osrmCyclingTimes(origin, destinations) {
+  // Build coordinate string: origin first, then destinations
+  const coords = [[origin.lng, origin.lat], ...destinations.map(d => [d.lng, d.lat])]
+    .map(([lng, lat]) => `${lng},${lat}`)
+    .join(';');
+
+  const url = `${OSRM}/table/v1/cycling/${coords}?sources=0&annotations=duration`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('OSRM table request failed');
+  const json = await res.json();
+  if (json.code !== 'Ok') throw new Error('OSRM: ' + json.message);
+  // durations[0] is source→source (0), [1..] are source→destinations
+  return json.durations[0].slice(1); // seconds, null if unreachable
+}
+
+function fmtMins(secs) {
+  if (secs == null) return '?';
+  const m = Math.round(secs / 60);
+  return m < 60 ? m + ' min' : Math.floor(m/60) + 'h ' + (m%60) + 'm';
 }
 
 // ── Markers ──────────────────────────────────────────────────────────────────
@@ -360,7 +385,8 @@ function badgeCls(c) {
 }
 
 // ── Render ───────────────────────────────────────────────────────────────────
-function render(sites) {
+// sites: array with .name .lat .lng .classification .dist .travelSecs (optional)
+function render(sites, radiusKm, timed) {
   markers.forEach(m => map.removeLayer(m));
   markers = [];
   if (ring) { map.removeLayer(ring); ring = null; }
@@ -370,13 +396,13 @@ function render(sites) {
   const count = document.getElementById('resCount');
   const sub   = document.getElementById('resSub');
 
-  const radiusKm = KMH[mode] * hours;
-
-  ring = L.circle([userLL.lat, userLL.lng], {
-    radius: radiusKm * 1000,
-    color:'#005f8e', fillColor:'#005f8e',
-    fillOpacity:.05, weight:1.5, dashArray:'6 4'
-  }).addTo(map);
+  if (radiusKm) {
+    ring = L.circle([userLL.lat, userLL.lng], {
+      radius: radiusKm * 1000,
+      color:'#005f8e', fillColor:'#005f8e',
+      fillOpacity:.05, weight:1.5, dashArray:'6 4'
+    }).addTo(map);
+  }
 
   if (!sites.length) {
     count.textContent = 'No results';
@@ -385,8 +411,10 @@ function render(sites) {
     return;
   }
 
+  const modeLabel = mode === 'cycling' ? '🚲 cycling' : '🚂 train (est.)';
   count.textContent = sites.length + ' bathing site' + (sites.length>1?'s':'') + ' found';
-  sub.textContent   = 'Within ~' + radiusKm.toFixed(0) + ' km · ' + hours + ' hr ' + mode;
+  sub.textContent   = hours + ' hr ' + modeLabel +
+    (timed ? '' : ' · straight-line estimate');
 
   list.innerHTML = '';
   const bounds = [[userLL.lat, userLL.lng]];
@@ -394,14 +422,19 @@ function render(sites) {
   sites.forEach(site => {
     bounds.push([site.lat, site.lng]);
 
+    const timeStr = site.travelSecs != null
+      ? fmtMins(site.travelSecs)
+      : '~' + Math.round(site.dist / TRAIN_KMH * 60) + ' min';
+
+    const distStr = '~' + site.dist.toFixed(1) + ' km';
+
     // Map marker
     const mk = L.marker([site.lat, site.lng], { icon: dotIcon(site.classification) })
       .addTo(map)
       .bindPopup(
-        '<strong>' + site.name + '</strong>' +
+        '<strong>' + esc(site.name) + '</strong>' +
         '<br>Quality: ' + site.classification +
-        '<br>~' + site.dist.toFixed(1) + ' km · ~' +
-        Math.round(site.dist / KMH[mode] * 60) + ' min ' + mode
+        '<br>' + distStr + ' · ' + timeStr + ' ' + mode
       );
     markers.push(mk);
 
@@ -412,8 +445,8 @@ function render(sites) {
       '<div class="card-name">' + esc(site.name) + '</div>' +
       '<div class="card-meta">' +
         '<span class="badge ' + badgeCls(site.classification) + '">' + site.classification + '</span>' +
-        '<span>~' + site.dist.toFixed(1) + ' km</span>' +
-        '<span>~' + Math.round(site.dist / KMH[mode] * 60) + ' min</span>' +
+        '<span>' + distStr + '</span>' +
+        '<span>' + timeStr + '</span>' +
       '</div>';
 
     card.addEventListener('click', () => {
@@ -457,15 +490,46 @@ async function search() {
       sitesReady = true;
     }
 
-    setStatus('Filtering…');
+    if (mode === 'cycling') {
+      // ── Cycling: real road times via OSRM ──────────────────────────────────
+      // Pre-filter with a 2× crow-flies buffer to limit OSRM destinations
+      const maxSecs  = hours * 3600;
+      const bufferKm = (hours * TRAIN_KMH) * 1.5; // generous buffer
+      const candidates = allSites
+        .map(s => ({ ...s, dist: distKm(userLL, s) }))
+        .filter(s => s.dist <= bufferKm);
 
-    const radiusKm = KMH[mode] * hours;
-    const nearby = allSites
-      .map(s => ({ ...s, dist: distKm(userLL, s) }))
-      .filter(s => s.dist <= radiusKm)
-      .sort((a,b) => a.dist - b.dist);
+      setStatus('Getting cycling times for ' + candidates.length + ' candidates…');
 
-    render(nearby);
+      let nearby;
+      try {
+        const durations = await osrmCyclingTimes(userLL, candidates);
+        nearby = candidates
+          .map((s, i) => ({ ...s, travelSecs: durations[i] }))
+          .filter(s => s.travelSecs != null && s.travelSecs <= maxSecs)
+          .sort((a, b) => a.travelSecs - b.travelSecs);
+      } catch (osrmErr) {
+        // OSRM unavailable — fall back to crow-flies with a warning
+        console.warn('OSRM unavailable, falling back to estimates:', osrmErr);
+        const fallbackKm = hours * 13;
+        nearby = candidates
+          .filter(s => s.dist <= fallbackKm)
+          .sort((a, b) => a.dist - b.dist);
+      }
+
+      render(nearby, bufferKm, true);
+
+    } else {
+      // ── Train: crow-flies estimate (no free UK rail routing API) ───────────
+      setStatus('Filtering…');
+      const radiusKm = TRAIN_KMH * hours;
+      const nearby = allSites
+        .map(s => ({ ...s, dist: distKm(userLL, s) }))
+        .filter(s => s.dist <= radiusKm)
+        .sort((a, b) => a.dist - b.dist);
+
+      render(nearby, radiusKm, false);
+    }
   } catch(e) {
     document.getElementById('resList').innerHTML =
       '<div class="state-box"><span>❌</span><span>' + esc(e.message) + '</span></div>';
