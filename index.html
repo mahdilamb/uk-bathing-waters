@@ -295,7 +295,7 @@
 
   <button class="btn-search" id="searchBtn">Search →</button>
   <button class="btn-reset"  id="resetBtn"  title="Clear results">✕ Reset</button>
-  <span class="note">🚶🚲 Road-routed via OSRM · 🚂 Live train times via Huxley2/National Rail · <label style="cursor:pointer"><input type="checkbox" id="stravaToggle" style="margin-right:.3rem">🔥 Strava swim heatmap</label></span>
+  <span class="note">🚶🚲 Road-routed via OSRM · 🚂 Live train times via Huxley2/National Rail</span>
 </div>
 
 <div class="main">
@@ -317,28 +317,6 @@ const map = L.map('map').setView([52.5, -1.8], 6);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors | Bathing water data © EA / NRW / SEPA'
 }).addTo(map);
-
-// ── Strava swim heatmap overlay ───────────────────────────────────────────────
-// Tiles load only if the browser already has Strava session cookies (cross-origin img request).
-// Users must be logged into Strava at strava.com for tiles to appear.
-const stravaLayer = L.tileLayer(
-  'https://heatmap-external-{s}.strava.com/tiles-auth/swim/mobileblue/{z}/{x}/{y}.png?v=19',
-  {
-    subdomains: ['a', 'b', 'c'],
-    opacity: 0.7,
-    maxZoom: 16,
-    attribution: '© <a href="https://www.strava.com">Strava</a> heatmap (requires login)',
-    crossOrigin: 'use-credentials',
-  }
-);
-
-document.getElementById('stravaToggle').addEventListener('change', function() {
-  if (this.checked) {
-    stravaLayer.addTo(map);
-  } else {
-    map.removeLayer(stravaLayer);
-  }
-});
 
 // ── Mode config ───────────────────────────────────────────────────────────────
 // osrmProfile: null = crow-flies estimate only; estKmh used for buffer & fallback

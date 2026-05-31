@@ -19,7 +19,6 @@ Find designated bathing sites in England, Wales and Scotland reachable within a 
 | **Multi-mode** | Select any combination — sites reachable by *any* selected mode appear |
 | **Quality filter** | Filter by Excellent / Good / Sufficient / Poor / Unknown |
 | **Show all** | All sites visible on the map on load; search narrows by travel time |
-| **Strava heatmap** | Swim heatmap overlay — tiles load if you're logged in to Strava |
 | **Directions** | Every popup links to Google Maps directions |
 
 ## Data sources
