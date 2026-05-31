@@ -295,7 +295,7 @@
 
   <button class="btn-search" id="searchBtn">Search →</button>
   <button class="btn-reset"  id="resetBtn"  title="Clear results">✕ Reset</button>
-  <span class="note">🚶🚲 Road-routed · 🚂 Train is crow-flies (no free rail routing API) · <label style="cursor:pointer"><input type="checkbox" id="stravaToggle" style="margin-right:.3rem">🔥 Strava swim heatmap</label></span>
+  <span class="note">🚶🚲 Road-routed via OSRM · 🚂 Live train times via Huxley2/National Rail · <label style="cursor:pointer"><input type="checkbox" id="stravaToggle" style="margin-right:.3rem">🔥 Strava swim heatmap</label></span>
 </div>
 
 <div class="main">
@@ -345,18 +345,21 @@ document.getElementById('stravaToggle').addEventListener('change', function() {
 const MODES = {
   walking: { label: 'Walking', emoji: '🚶', osrmProfile: 'foot',    estKmh:  5, routed: true  },
   cycling: { label: 'Cycling', emoji: '🚲', osrmProfile: 'cycling', estKmh: 13, routed: true  },
-  train:   { label: 'Train',   emoji: '🚂', osrmProfile: null,      estKmh: 52, routed: false },
+  train:   { label: 'Train',   emoji: '🚂', osrmProfile: null,      estKmh: 52, routed: true  },
 };
-const OSRM = 'https://router.project-osrm.org';
+const OSRM    = 'https://router.project-osrm.org';
+const HUXLEY  = 'https://huxley2.azurewebsites.net';
 
 // ── State ────────────────────────────────────────────────────────────────────
 let allSites         = [];
+let stationsData     = [];         // UK railway stations with CRS codes
 let sitesReady       = false;
 let userLL           = null;
 let selectedModes    = new Set(['cycling']);
 let selectedQualities= new Set(['Excellent','Good','Sufficient','Poor','Unknown']);
 let hours            = 1.5;
 let markers          = [];         // search-result markers
+const trainCache     = {};         // key: "FROM:TO" → journey minutes (null = no service)
 let allSiteMarkers   = [];         // background "show all" markers
 let lastSearchResults= null;       // cached results pre-quality-filter
 let userPin          = null;
@@ -369,6 +372,118 @@ async function loadSites() {
   if (!res.ok) throw new Error('Could not load site data (' + res.status + ')');
   const raw = await res.json();
   return raw.map(s => ({ name: s.n, lat: s.lat, lng: s.lng, classification: s.c, type: s.t, src: s.s || 'EA' }));
+}
+
+// ── Railway station helpers ───────────────────────────────────────────────────
+function nearestStation(ll, maxKm = 5) {
+  let best = null, bestD = Infinity;
+  for (const st of stationsData) {
+    const d = distKm(ll, { lat: st.lat, lng: st.lng });
+    if (d < bestD && d <= maxKm) { bestD = d; best = { ...st, distKm: d }; }
+  }
+  return best; // null if none within maxKm
+}
+
+// Parse "HH:MM" → minutes since midnight
+function parseMins(t) {
+  if (!t) return null;
+  const [h, m] = t.split(':').map(Number);
+  return h * 60 + m;
+}
+
+// Huxley2: fastest journey minutes from → to (with caching).
+// Returns total minutes (journey only, no station walking) or null if no service found.
+async function huxleyJourneyMins(fromCRS, toCRS) {
+  const key = fromCRS + ':' + toCRS;
+  if (key in trainCache) return trainCache[key];
+
+  try {
+    // Step 1: get fastest service
+    const r1 = await fetch(`${HUXLEY}/fastest/${fromCRS}/to/${toCRS}`, {
+      headers: { Accept: 'application/json' }
+    });
+    if (!r1.ok) { trainCache[key] = null; return null; }
+    const d1 = await r1.json();
+    const deps = d1.departures || [];
+    if (!deps.length || !deps[0].service) { trainCache[key] = null; return null; }
+
+    const svc = deps[0].service;
+    const stdMins = parseMins(svc.std);
+    const svcId   = svc.serviceIdUrlSafe;
+    if (!svcId || stdMins == null) { trainCache[key] = null; return null; }
+
+    // Step 2: get calling points to find arrival at destination
+    const r2 = await fetch(`${HUXLEY}/service/${svcId}`, {
+      headers: { Accept: 'application/json' }
+    });
+    if (!r2.ok) { trainCache[key] = null; return null; }
+    const d2 = await r2.json();
+
+    const callingLists = d2.subsequentCallingPoints || [];
+    let arrMins = null;
+    for (const cl of callingLists) {
+      const stops = cl.callingPoint || [];
+      const stop = stops.find(s => s.crs === toCRS);
+      if (stop) { arrMins = parseMins(stop.st); break; }
+    }
+    if (arrMins == null) { trainCache[key] = null; return null; }
+
+    // Handle midnight wrap
+    let dur = arrMins - stdMins;
+    if (dur < 0) dur += 24 * 60;
+    trainCache[key] = dur;
+    return dur;
+  } catch(e) {
+    trainCache[key] = null;
+    return null;
+  }
+}
+
+// ── Train routing for a set of candidates ────────────────────────────────────
+// Returns candidates annotated with .trainSecs (or null) and .trainNote
+async function routeByTrain(origin, candidates, maxSecs, onProgress) {
+  const originStn = nearestStation(origin, 3);
+  if (!originStn) return candidates.map(s => ({ ...s, trainSecs: null }));
+
+  // Walk time user → origin station (crow-flies × 1.4 factor, 5 km/h)
+  const walkToStnSecs = (originStn.distKm * 1.4 / 5) * 3600;
+
+  // For each candidate find its nearest station, then query unique pairs
+  const withStns = candidates.map(site => {
+    const stn = nearestStation(site, 3);
+    // Walk time station → site
+    const walkFromStnSecs = stn ? (distKm(site, { lat: stn.lat, lng: stn.lng }) * 1.4 / 5) * 3600 : null;
+    return { ...site, destStn: stn, walkFromStnSecs };
+  });
+
+  // Unique destination CRS codes (excluding same as origin)
+  const uniqueDest = [...new Set(
+    withStns.filter(s => s.destStn && s.destStn.c !== originStn.c).map(s => s.destStn.c)
+  )];
+
+  // Batch Huxley2 calls (max 5 in flight at a time)
+  let done = 0;
+  const BATCH = 5;
+  for (let i = 0; i < uniqueDest.length; i += BATCH) {
+    const batch = uniqueDest.slice(i, i + BATCH);
+    await Promise.all(batch.map(toCRS => huxleyJourneyMins(originStn.c, toCRS)));
+    done += batch.length;
+    onProgress(done, uniqueDest.length);
+  }
+
+  // Annotate candidates with total train time
+  return withStns.map(site => {
+    if (!site.destStn) return { ...site, trainSecs: null };
+    if (site.destStn.c === originStn.c) {
+      // Same station — walking only
+      return { ...site, trainSecs: site.walkFromStnSecs };
+    }
+    const journeyMins = trainCache[originStn.c + ':' + site.destStn.c];
+    if (journeyMins == null) return { ...site, trainSecs: null };
+    const total = walkToStnSecs + journeyMins * 60 + (site.walkFromStnSecs || 0);
+    return { ...site, trainSecs: total,
+      trainNote: originStn.n + ' → ' + site.destStn.n + ' (' + journeyMins + ' min)' };
+  });
 }
 
 // ── Show all sites on map (background layer, no search active) ───────────────
@@ -519,7 +634,9 @@ function render(sites) {
     }, { mKey: null, secs: Infinity });
 
     const distStr = '~' + site.dist.toFixed(1) + ' km';
-    const travelLine = distStr + (bestMode.mKey ? ' · ' + MODES[bestMode.mKey].emoji + ' ' + fmtMins(bestMode.secs) : '');
+    const trainLine = (bestMode.mKey === 'train' && site.trainNote)
+      ? '<br><small style="color:#666">🚉 ' + esc(site.trainNote) + '</small>' : '';
+    const travelLine = distStr + (bestMode.mKey ? ' · ' + MODES[bestMode.mKey].emoji + ' ' + fmtMins(bestMode.secs) : '') + trainLine;
 
     const mk = L.marker([site.lat, site.lng], { icon: dotIcon(site.classification) })
       .addTo(map)
@@ -585,15 +702,14 @@ async function search() {
       .map(s => ({ ...s, dist: distKm(userLL, s) }))
       .filter(s => s.dist <= bufferKm);
 
-    // Run all selected modes in parallel
-    const routedModes  = [...selectedModes].filter(m => MODES[m].routed);
-    const estimateModes = [...selectedModes].filter(m => !MODES[m].routed);
+    const osrmModes = [...selectedModes].filter(m => MODES[m].osrmProfile);
+    const trainMode = selectedModes.has('train');
 
     setStatus('Routing ' + [...selectedModes].map(m => MODES[m].emoji).join('') +
       ' for ' + candidates.length + ' candidates…');
 
-    // OSRM calls in parallel; fall back to estimates on failure
-    const osrmResults = await Promise.all(routedModes.map(async mKey => {
+    // ── OSRM (walking + cycling) in parallel ─────────────────────────────────
+    const osrmResults = await Promise.all(osrmModes.map(async mKey => {
       try {
         const durations = await osrmTimes(MODES[mKey].osrmProfile, userLL, candidates);
         return { mKey, durations, ok: true };
@@ -603,30 +719,38 @@ async function search() {
       }
     }));
 
-    // Build modeTimes per candidate
+    // ── Huxley2 train routing ─────────────────────────────────────────────────
+    let trainAnnotated = candidates.map(s => ({ ...s, trainSecs: null, trainNote: null }));
+    if (trainMode) {
+      setStatus('🚂 Finding train times… (checking ' + candidates.length + ' sites)');
+      trainAnnotated = await routeByTrain(userLL, candidates, maxSecs, (done, total) => {
+        setStatus('🚂 Train routing: ' + done + '/' + total + ' station pairs…');
+      });
+    }
+
+    // ── Merge into per-site modeTimes ─────────────────────────────────────────
     const withTimes = candidates.map((site, i) => {
       const modeTimes = {};
 
       for (const { mKey, durations, ok } of osrmResults) {
-        modeTimes[mKey] = ok && durations[i] != null ? durations[i] : null;
-        // Fallback estimate if OSRM failed
-        if (modeTimes[mKey] == null && !MODES[mKey].routed === false) {
-          modeTimes[mKey] = site.dist / MODES[mKey].estKmh * 3600;
-        }
-      }
-      for (const mKey of estimateModes) {
-        modeTimes[mKey] = site.dist / MODES[mKey].estKmh * 3600;
+        modeTimes[mKey] = ok && durations[i] != null ? durations[i]
+          : site.dist / MODES[mKey].estKmh * 3600; // crow-flies fallback
       }
 
-      // Best time across selected modes
+      if (trainMode) {
+        const ta = trainAnnotated[i];
+        modeTimes.train = ta.trainSecs != null ? ta.trainSecs
+          : site.dist / MODES.train.estKmh * 3600; // crow-flies fallback
+      }
+
       const bestSecs = Math.min(...[...selectedModes].map(m =>
         modeTimes[m] != null ? modeTimes[m] : Infinity
       ));
 
-      return { ...site, modeTimes, bestSecs };
+      return { ...site, modeTimes, bestSecs,
+        trainNote: trainMode ? (trainAnnotated[i].trainNote || null) : null };
     });
 
-    // Keep sites reachable by at least one selected mode within the time limit
     const nearby = withTimes
       .filter(s => s.bestSecs <= maxSecs)
       .sort((a, b) => a.bestSecs - b.bestSecs);
@@ -737,13 +861,17 @@ document.getElementById('qualityPills').querySelectorAll('.pill').forEach(p => {
   });
 });
 
-// Pre-load data on page start
-loadSites().then(s => {
-  allSites   = s;
-  sitesReady = true;
+// Pre-load sites + stations on page start
+Promise.all([
+  loadSites(),
+  fetch('./stations.json').then(r => r.json())
+]).then(([sites, stns]) => {
+  allSites     = sites;
+  stationsData = stns;
+  sitesReady   = true;
   showAllSites();
   map.setView([54.5, -3.5], 6);
-}).catch(() => {});
+}).catch(e => console.error('Load error:', e));
 </script>
 </body>
 </html>
