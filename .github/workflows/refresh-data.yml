@@ -17,60 +17,105 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fetch latest EA bathing water data
+      - name: Fetch bathing water data for all UK nations
         run: |
           python3 - << 'EOF'
           import urllib.request, json, time, sys
 
-          sites = []
-          url = "https://environment.data.gov.uk/doc/bathing-water.json?_pageSize=50"
-          page = 0
-
-          while url:
-              print(f"Fetching page {page}…", flush=True)
+          def fetch(url, label):
               req = urllib.request.Request(url, headers={"User-Agent": "uk-bathing-waters-ci/1.0"})
               try:
                   with urllib.request.urlopen(req, timeout=30) as r:
-                      data = json.loads(r.read())
+                      return json.loads(r.read())
               except Exception as e:
-                  print(f"ERROR on page {page}: {e}", file=sys.stderr)
+                  print(f"ERROR fetching {label}: {e}", file=sys.stderr)
                   sys.exit(1)
 
+          sites = []
+
+          # ── England: EA linked data ──────────────────────────────────────────
+          print("England (EA)…", flush=True)
+          url = "https://environment.data.gov.uk/doc/bathing-water.json?_pageSize=50"
+          page = 0
+          while url:
+              data = fetch(url, f"EA page {page}")
               for item in data["result"]["items"]:
                   sp = item.get("samplingPoint", {})
-                  lat = sp.get("lat")
-                  lng = sp.get("long")
-                  if not lat or not lng:
-                      continue
-
+                  lat, lng = sp.get("lat"), sp.get("long")
+                  if not lat or not lng: continue
                   name = item.get("name", {})
-                  if isinstance(name, dict):
-                      name = name.get("_value", "")
-
+                  if isinstance(name, dict): name = name.get("_value", "")
                   cls_obj = item.get("latestComplianceAssessment", {})
                   cls = "Unknown"
                   if isinstance(cls_obj, dict):
                       c = cls_obj.get("complianceClassification", {})
-                      if isinstance(c, dict):
-                          cls = c.get("name", {}).get("_value", "Unknown")
-
+                      if isinstance(c, dict): cls = c.get("name", {}).get("_value", "Unknown")
                   bw_type = item.get("type", [])
                   bw_type = [t.split("/")[-1] for t in bw_type if isinstance(t, str) and "/" in t]
                   specific = [t for t in bw_type if t != "BathingWater"]
                   bw_type = specific[0] if specific else "BathingWater"
+                  sites.append({"n": name, "lat": round(lat,6), "lng": round(lng,6), "c": cls, "t": bw_type, "s": "EA"})
+              url = data["result"].get("next"); page += 1; time.sleep(0.3)
+          print(f"  {sum(1 for s in sites if s['s']=='EA')} sites")
 
-                  sites.append({"n": name, "lat": lat, "lng": lng, "c": cls, "t": bw_type})
+          # ── Wales: NRW WFS ───────────────────────────────────────────────────
+          print("Wales (NRW)…", flush=True)
+          wales = fetch(
+              "https://datamap.gov.wales/geoserver/ows?service=WFS&version=1.0.0"
+              "&request=GetFeature&typeName=inspire-nrw:Areas_Affecting_Bathing_Waters"
+              "&outputFormat=application/json&srsName=EPSG:4326&maxFeatures=500",
+              "NRW WFS"
+          )
+          seen = set()
+          for f in wales["features"]:
+              bw_id = f["properties"].get("bw_id", "")
+              name = f["properties"].get("bw_name", "").strip()
+              if bw_id in seen or not name: continue
+              seen.add(bw_id)
+              coords = f["geometry"]["coordinates"][0]
+              lng = sum(c[0] for c in coords) / len(coords)
+              lat = sum(c[1] for c in coords) / len(coords)
+              sites.append({"n": name, "lat": round(lat,6), "lng": round(lng,6), "c": "Unknown", "t": "CoastalBathingWater", "s": "NRW"})
+          print(f"  {sum(1 for s in sites if s['s']=='NRW')} sites")
 
-              nxt = data["result"].get("next")
-              url = nxt if nxt else None
-              page += 1
-              time.sleep(0.3)
+          # ── Scotland: SEPA ArcGIS REST ───────────────────────────────────────
+          print("Scotland (SEPA)…", flush=True)
+          scot = fetch(
+              "https://map.sepa.org.uk/server/rest/services/Open/Environmental_Monitoring"
+              "/MapServer/1/query?where=1%3D1&outFields=*&outSR=4326&f=geojson",
+              "SEPA"
+          )
+          def sepa_cls(c):
+              c = (c or "").lower()
+              for k in ("excellent","good","sufficient","poor"):
+                  if k in c: return k.capitalize()
+              return "Unknown"
+          for f in scot["features"]:
+              p = f["properties"]; coords = f["geometry"]["coordinates"]
+              name = p.get("description","").strip()
+              if not name: continue
+              sites.append({"n": name, "lat": round(coords[1],6), "lng": round(coords[0],6),
+                            "c": sepa_cls(p.get("class_description","")), "t": "CoastalBathingWater", "s": "SEPA"})
+          print(f"  {sum(1 for s in sites if s['s']=='SEPA')} sites")
 
-          print(f"Fetched {len(sites)} sites")
+          # ── Northern Ireland: DAERA ──────────────────────────────────────────
+          print("Northern Ireland (DAERA)…", flush=True)
+          ni = fetch(
+              "https://opendata-daerani.hub.arcgis.com/api/download/v1/items/"
+              "aeda40124d52464eb347aa93db64b3d8/geojson?layers=0",
+              "DAERA"
+          )
+          for f in ni["features"]:
+              p = f["properties"]; name = p.get("Name","").strip()
+              lng, lat = p.get("centroidX"), p.get("centroidY")
+              if not name or not lat or not lng: continue
+              sites.append({"n": name, "lat": round(float(lat),6), "lng": round(float(lng),6),
+                            "c": "Unknown", "t": "CoastalBathingWater", "s": "DAERA"})
+          print(f"  {sum(1 for s in sites if s['s']=='DAERA')} sites")
 
+          print(f"Total: {len(sites)} sites")
           with open("sites.json", "w") as f:
               json.dump(sites, f, separators=(",", ":"))
-
           EOF
 
       - name: Check for changes

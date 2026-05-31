@@ -103,6 +103,14 @@
     .btn-search:hover { background: #004f77; }
     .btn-search:disabled { opacity: .5; cursor: default; }
 
+    .btn-reset {
+      background: #fff;
+      color: var(--muted);
+      border: 2px solid var(--border);
+      padding: .5rem .8rem;
+    }
+    .btn-reset:hover { background: #fef2f2; color: #c62828; border-color: #f5c6cb; }
+
     /* mode pills */
     .pills { display: flex; gap: .35rem; }
     .pill {
@@ -268,7 +276,8 @@
   </div>
 
   <button class="btn-search" id="searchBtn">Search →</button>
-  <span class="note">🚶🚲 Road-routed via OSRM · 🚂 Train is a straight-line estimate</span>
+  <button class="btn-reset"  id="resetBtn"  title="Clear results">✕ Reset</button>
+  <span class="note">🚶🚲 Road-routed · 🚂 Train is crow-flies (no free rail routing API) · <label style="cursor:pointer"><input type="checkbox" id="stravaToggle" style="margin-right:.3rem">🔥 Strava swim heatmap</label></span>
 </div>
 
 <div class="main">
@@ -288,8 +297,30 @@
 // ── Map ──────────────────────────────────────────────────────────────────────
 const map = L.map('map').setView([52.5, -1.8], 6);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors | Bathing water data © Environment Agency'
+  attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors | Bathing water data © EA / NRW / SEPA / DAERA'
 }).addTo(map);
+
+// ── Strava swim heatmap overlay ───────────────────────────────────────────────
+// Tiles load only if the browser already has Strava session cookies (cross-origin img request).
+// Users must be logged into Strava at strava.com for tiles to appear.
+const stravaLayer = L.tileLayer(
+  'https://heatmap-external-{s}.strava.com/tiles-auth/swim/mobileblue/{z}/{x}/{y}.png?v=19',
+  {
+    subdomains: ['a', 'b', 'c'],
+    opacity: 0.7,
+    maxZoom: 16,
+    attribution: '© <a href="https://www.strava.com">Strava</a> heatmap (requires login)',
+    crossOrigin: 'use-credentials',
+  }
+);
+
+document.getElementById('stravaToggle').addEventListener('change', function() {
+  if (this.checked) {
+    stravaLayer.addTo(map);
+  } else {
+    map.removeLayer(stravaLayer);
+  }
+});
 
 // ── Mode config ───────────────────────────────────────────────────────────────
 // osrmProfile: null = crow-flies estimate only; estKmh used for buffer & fallback
@@ -614,6 +645,27 @@ document.getElementById('timeSlider').addEventListener('input', e => {
   hours = parseFloat(e.target.value);
   document.getElementById('timeVal').textContent =
     hours + ' hr' + (hours !== 1 ? 's' : '');
+});
+
+// ── Reset ─────────────────────────────────────────────────────────────────────
+document.getElementById('resetBtn').addEventListener('click', () => {
+  // Clear markers + ring
+  markers.forEach(m => map.removeLayer(m));
+  markers = [];
+  if (ring) { map.removeLayer(ring); ring = null; }
+  if (userPin) { map.removeLayer(userPin); userPin = null; }
+  activeCard = null;
+  userLL = null;
+
+  // Reset controls
+  document.getElementById('locInput').value = '';
+  document.getElementById('resCount').textContent = 'Results';
+  document.getElementById('resSub').textContent = allSites.length
+    ? allSites.length + ' sites loaded — enter a location to search'
+    : 'Enter a location above to get started';
+  document.getElementById('resList').innerHTML =
+    '<div class="state-box"><span>🗺️</span><span>Search to find bathing waters</span></div>';
+  map.setView([54, -3], 6);
 });
 
 // Pre-load data on page start
