@@ -304,54 +304,13 @@ let activeCard = null;
 // Conservative crow-flies speed proxies (km/h)
 const KMH = { cycling: 13, train: 52 };
 
-// ── Fetch bathing water data (EA SPARQL) ─────────────────────────────────────
+// ── Load bundled bathing water data (464 EA-designated sites, England) ───────
 async function loadSites() {
-  const q = `
-SELECT DISTINCT ?bw ?name ?lat ?lng ?cls WHERE {
-  ?bw a <http://environment.data.gov.uk/def/bathing-water/BathingWater> ;
-      <http://www.w3.org/2000/01/rdf-schema#label> ?name ;
-      <http://www.w3.org/2003/01/geo/wgs84_pos#lat>  ?lat ;
-      <http://www.w3.org/2003/01/geo/wgs84_pos#long> ?lng .
-  OPTIONAL {
-    [] a <http://environment.data.gov.uk/def/bwq/BWQAnnualComplianceAssessment> ;
-       <http://environment.data.gov.uk/def/bwq/bathingWater> ?bw ;
-       <http://environment.data.gov.uk/def/bwq/complianceClassification> ?cls .
-  }
-} ORDER BY ?name
-`.trim();
-
-  const url = 'https://environment.data.gov.uk/sparql?query=' + encodeURIComponent(q) + '&output=json';
-  const res = await fetch(url);
-  if (!res.ok) throw new Error('Data fetch failed (' + res.status + ')');
-  const json = await res.json();
-
-  // Deduplicate — keep the "best" classification per site
-  const order = { Excellent:4, Good:3, Sufficient:2, Poor:1, Unknown:0 };
-  const map2 = new Map();
-  for (const r of json.results.bindings) {
-    const id  = r.bw.value;
-    const cls = parseClass(r.cls?.value);
-    if (!map2.has(id) || order[cls] > order[map2.get(id).classification]) {
-      map2.set(id, {
-        id,
-        name: r.name.value,
-        lat:  parseFloat(r.lat.value),
-        lng:  parseFloat(r.lng.value),
-        classification: cls,
-      });
-    }
-  }
-  return [...map2.values()].filter(s => !isNaN(s.lat) && !isNaN(s.lng));
-}
-
-function parseClass(uri='') {
-  if (!uri) return 'Unknown';
-  const u = uri.toLowerCase();
-  if (u.includes('excellent')) return 'Excellent';
-  if (u.includes('good'))      return 'Good';
-  if (u.includes('sufficient'))return 'Sufficient';
-  if (u.includes('poor'))      return 'Poor';
-  return 'Unknown';
+  const res = await fetch('./sites.json');
+  if (!res.ok) throw new Error('Could not load site data (' + res.status + ')');
+  const raw = await res.json();
+  // Stored compactly: { n: name, lat, lng, c: classification, t: type }
+  return raw.map(s => ({ name: s.n, lat: s.lat, lng: s.lng, classification: s.c, type: s.t }));
 }
 
 // ── Geocode (Nominatim) ──────────────────────────────────────────────────────
@@ -569,8 +528,12 @@ document.getElementById('timeSlider').addEventListener('input', e => {
     hours + ' hr' + (hours !== 1 ? 's' : '');
 });
 
-// Pre-fetch data silently in the background
-loadSites().then(s => { allSites = s; sitesReady = true; }).catch(() => {});
+// Pre-load data on page start
+loadSites().then(s => {
+  allSites   = s;
+  sitesReady = true;
+  document.getElementById('resSub').textContent = s.length + ' sites loaded — enter a location to search';
+}).catch(() => {});
 </script>
 </body>
 </html>
