@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>UK Bathing Waters — Find by Travel Time</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --blue:  #005f8e;
+      --blue2: #007eb3;
+      --surf:  #e8f5fb;
+      --border: #dde8f0;
+      --text:  #1a2832;
+      --muted: #6b7f8a;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f0f7fb;
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      height: 100dvh;
+      overflow: hidden;
+    }
+
+    /* ── Header ── */
+    header {
+      background: linear-gradient(135deg, #004f77, var(--blue2));
+      color: #fff;
+      padding: 0.9rem 1.5rem;
+      display: flex;
+      align-items: baseline;
+      gap: 1rem;
+      flex-shrink: 0;
+      box-shadow: 0 2px 8px rgba(0,0,0,.25);
+    }
+    header h1 { font-size: 1.25rem; font-weight: 700; }
+    header p  { font-size: 0.82rem; opacity: .8; }
+
+    /* ── Controls bar ── */
+    .controls {
+      background: #fff;
+      border-bottom: 1px solid var(--border);
+      padding: 0.75rem 1.25rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem 1.25rem;
+      align-items: flex-end;
+      flex-shrink: 0;
+    }
+
+    .cg { display: flex; flex-direction: column; gap: 0.3rem; }
+    .cg label {
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .6px;
+      color: var(--muted);
+    }
+
+    .loc-row { display: flex; gap: .4rem; }
+
+    input[type="text"] {
+      padding: .5rem .8rem;
+      border: 2px solid var(--border);
+      border-radius: 8px;
+      font-size: .92rem;
+      width: 260px;
+      outline: none;
+      transition: border-color .15s;
+    }
+    input[type="text"]:focus { border-color: var(--blue2); }
+
+    button {
+      padding: .5rem .9rem;
+      border: none;
+      border-radius: 8px;
+      font-size: .88rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s, transform .1s;
+      white-space: nowrap;
+    }
+    button:active { transform: scale(.97); }
+
+    .btn-locate {
+      background: var(--surf);
+      color: var(--blue);
+      border: 2px solid #b0d4e8;
+    }
+    .btn-locate:hover { background: #d4ecf7; }
+
+    .btn-search {
+      background: var(--blue);
+      color: #fff;
+      padding: .5rem 1.2rem;
+    }
+    .btn-search:hover { background: #004f77; }
+    .btn-search:disabled { opacity: .5; cursor: default; }
+
+    /* mode pills */
+    .pills { display: flex; gap: .35rem; }
+    .pill {
+      padding: .4rem .85rem;
+      border: 2px solid var(--border);
+      border-radius: 20px;
+      background: #fff;
+      color: var(--muted);
+      font-size: .86rem;
+    }
+    .pill.on { border-color: var(--blue); background: var(--surf); color: var(--blue); }
+
+    /* slider */
+    .slider-row { display: flex; align-items: center; gap: .6rem; }
+    input[type="range"] {
+      width: 130px;
+      accent-color: var(--blue);
+      cursor: pointer;
+    }
+    .time-val {
+      font-size: .95rem;
+      font-weight: 700;
+      color: var(--blue);
+      min-width: 52px;
+    }
+
+    /* ── Main layout ── */
+    .main {
+      display: grid;
+      grid-template-columns: 370px 1fr;
+      flex: 1;
+      min-height: 0;
+    }
+
+    /* ── Sidebar ── */
+    .sidebar {
+      background: #fff;
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .sb-head {
+      padding: .9rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      background: #f8fbfd;
+      flex-shrink: 0;
+    }
+    .sb-head h2 { font-size: .97rem; }
+    .sb-head p  { font-size: .78rem; color: var(--muted); margin-top: .15rem; }
+
+    .sb-body { overflow-y: auto; flex: 1; }
+
+    .card {
+      padding: .85rem 1.25rem;
+      border-bottom: 1px solid #f0f5f8;
+      cursor: pointer;
+      transition: background .12s;
+      border-left: 3px solid transparent;
+    }
+    .card:hover  { background: #f5fafd; }
+    .card.active { background: var(--surf); border-left-color: var(--blue); }
+
+    .card-name { font-size: .92rem; font-weight: 600; }
+    .card-meta {
+      font-size: .78rem;
+      color: var(--muted);
+      margin-top: .3rem;
+      display: flex;
+      align-items: center;
+      gap: .6rem;
+      flex-wrap: wrap;
+    }
+
+    .badge {
+      padding: .1rem .45rem;
+      border-radius: 4px;
+      font-size: .72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .bE { background: #e8f5e9; color: #2e7d32; }
+    .bG { background: #e3f2fd; color: #1565c0; }
+    .bS { background: #fff8e1; color: #e65100; }
+    .bP { background: #fce4ec; color: #c62828; }
+    .bU { background: #f3f3f3; color: #777; }
+
+    /* ── Map ── */
+    #map { width: 100%; height: 100%; }
+
+    /* ── States ── */
+    .state-box {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 180px;
+      gap: .5rem;
+      color: var(--muted);
+      font-size: .88rem;
+    }
+    .state-box span:first-child { font-size: 2rem; }
+
+    .spinner {
+      width: 28px; height: 28px;
+      border: 3px solid #dde8f0;
+      border-top-color: var(--blue);
+      border-radius: 50%;
+      animation: spin .75s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Note strip ── */
+    .note {
+      font-size: .75rem;
+      color: #7a6000;
+      background: #fffce8;
+      border: 1px solid #ffe082;
+      border-radius: 7px;
+      padding: .4rem .75rem;
+      align-self: center;
+    }
+
+    @media (max-width: 700px) {
+      .main { grid-template-columns: 1fr; grid-template-rows: 55% 45%; }
+      .sidebar { border-right: none; border-top: 1px solid var(--border); order: 2; }
+      #map { order: 1; }
+      input[type="text"] { width: 190px; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>🏖️ UK Bathing Waters</h1>
+  <p>Find designated bathing sites within cycling or train distance</p>
+</header>
+
+<div class="controls">
+  <div class="cg">
+    <label>Your Location</label>
+    <div class="loc-row">
+      <input type="text" id="locInput" placeholder="e.g. Leeds, SW1A 1AA…" />
+      <button class="btn-locate" id="locateBtn">📍 Locate me</button>
+    </div>
+  </div>
+
+  <div class="cg">
+    <label>Travel Mode</label>
+    <div class="pills">
+      <button class="pill on" data-mode="cycling">🚲 Cycling</button>
+      <button class="pill"    data-mode="train">🚂 Train</button>
+    </div>
+  </div>
+
+  <div class="cg">
+    <label>Max time</label>
+    <div class="slider-row">
+      <input type="range" id="timeSlider" min="0.5" max="4" step="0.5" value="1.5" />
+      <span class="time-val" id="timeVal">1.5 hrs</span>
+    </div>
+  </div>
+
+  <button class="btn-search" id="searchBtn">Search →</button>
+  <span class="note">⚠ Distances are straight-line estimates — real travel times will vary</span>
+</div>
+
+<div class="main">
+  <div class="sidebar">
+    <div class="sb-head">
+      <h2 id="resCount">Results</h2>
+      <p id="resSub">Enter a location above to get started</p>
+    </div>
+    <div class="sb-body" id="resList">
+      <div class="state-box"><span>🗺️</span><span>Search to find bathing waters</span></div>
+    </div>
+  </div>
+  <div id="map"></div>
+</div>
+
+<script>
+// ── Map ──────────────────────────────────────────────────────────────────────
+const map = L.map('map').setView([52.5, -1.8], 6);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors | Bathing water data © Environment Agency'
+}).addTo(map);
+
+// ── State ────────────────────────────────────────────────────────────────────
+let allSites   = [];
+let sitesReady = false;
+let userLL     = null;
+let mode       = 'cycling';
+let hours      = 1.5;
+let markers    = [];
+let userPin    = null;
+let ring       = null;
+let activeCard = null;
+
+// Conservative crow-flies speed proxies (km/h)
+const KMH = { cycling: 13, train: 52 };
+
+// ── Fetch bathing water data (EA SPARQL) ─────────────────────────────────────
+async function loadSites() {
+  const q = `
+SELECT DISTINCT ?bw ?name ?lat ?lng ?cls WHERE {
+  ?bw a <http://environment.data.gov.uk/def/bathing-water/BathingWater> ;
+      <http://www.w3.org/2000/01/rdf-schema#label> ?name ;
+      <http://www.w3.org/2003/01/geo/wgs84_pos#lat>  ?lat ;
+      <http://www.w3.org/2003/01/geo/wgs84_pos#long> ?lng .
+  OPTIONAL {
+    [] a <http://environment.data.gov.uk/def/bwq/BWQAnnualComplianceAssessment> ;
+       <http://environment.data.gov.uk/def/bwq/bathingWater> ?bw ;
+       <http://environment.data.gov.uk/def/bwq/complianceClassification> ?cls .
+  }
+} ORDER BY ?name
+`.trim();
+
+  const url = 'https://environment.data.gov.uk/sparql?query=' + encodeURIComponent(q) + '&output=json';
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('Data fetch failed (' + res.status + ')');
+  const json = await res.json();
+
+  // Deduplicate — keep the "best" classification per site
+  const order = { Excellent:4, Good:3, Sufficient:2, Poor:1, Unknown:0 };
+  const map2 = new Map();
+  for (const r of json.results.bindings) {
+    const id  = r.bw.value;
+    const cls = parseClass(r.cls?.value);
+    if (!map2.has(id) || order[cls] > order[map2.get(id).classification]) {
+      map2.set(id, {
+        id,
+        name: r.name.value,
+        lat:  parseFloat(r.lat.value),
+        lng:  parseFloat(r.lng.value),
+        classification: cls,
+      });
+    }
+  }
+  return [...map2.values()].filter(s => !isNaN(s.lat) && !isNaN(s.lng));
+}
+
+function parseClass(uri='') {
+  if (!uri) return 'Unknown';
+  const u = uri.toLowerCase();
+  if (u.includes('excellent')) return 'Excellent';
+  if (u.includes('good'))      return 'Good';
+  if (u.includes('sufficient'))return 'Sufficient';
+  if (u.includes('poor'))      return 'Poor';
+  return 'Unknown';
+}
+
+// ── Geocode (Nominatim) ──────────────────────────────────────────────────────
+async function geocode(q) {
+  const url = 'https://nominatim.openstreetmap.org/search?q=' +
+    encodeURIComponent(q) + '&countrycodes=gb&limit=1&format=json';
+  const res = await fetch(url, { headers: { 'Accept-Language':'en' } });
+  const json = await res.json();
+  if (!json.length) throw new Error('Location "' + q + '" not found — try a town name or postcode');
+  return { lat: parseFloat(json[0].lat), lng: parseFloat(json[0].lon) };
+}
+
+// ── Haversine ────────────────────────────────────────────────────────────────
+function distKm(a, b) {
+  const R = 6371, rad = Math.PI/180;
+  const dLat = (b.lat - a.lat)*rad, dLng = (b.lng - a.lng)*rad;
+  const x = Math.sin(dLat/2)**2 +
+    Math.cos(a.lat*rad)*Math.cos(b.lat*rad)*Math.sin(dLng/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1-x));
+}
+
+// ── Markers ──────────────────────────────────────────────────────────────────
+const DOT_COLOR = { Excellent:'#1b7e30', Good:'#1255a0', Sufficient:'#c45c00', Poor:'#b71c1c', Unknown:'#555' };
+
+function dotIcon(c) {
+  const col = DOT_COLOR[c] || '#555';
+  return L.divIcon({
+    html: `<div style="width:13px;height:13px;border-radius:50%;
+             background:${col};border:2.5px solid #fff;
+             box-shadow:0 1px 4px rgba(0,0,0,.45)"></div>`,
+    className: '', iconSize:[13,13], iconAnchor:[6.5,6.5]
+  });
+}
+
+function userIcon() {
+  return L.divIcon({
+    html: `<div style="width:17px;height:17px;border-radius:50%;
+             background:#005f8e;border:3px solid #fff;
+             box-shadow:0 2px 6px rgba(0,0,0,.5)"></div>`,
+    className:'', iconSize:[17,17], iconAnchor:[8.5,8.5]
+  });
+}
+
+// ── Badge helpers ────────────────────────────────────────────────────────────
+function badgeCls(c) {
+  return { Excellent:'bE', Good:'bG', Sufficient:'bS', Poor:'bP' }[c] || 'bU';
+}
+
+// ── Render ───────────────────────────────────────────────────────────────────
+function render(sites) {
+  markers.forEach(m => map.removeLayer(m));
+  markers = [];
+  if (ring) { map.removeLayer(ring); ring = null; }
+  activeCard = null;
+
+  const list  = document.getElementById('resList');
+  const count = document.getElementById('resCount');
+  const sub   = document.getElementById('resSub');
+
+  const radiusKm = KMH[mode] * hours;
+
+  ring = L.circle([userLL.lat, userLL.lng], {
+    radius: radiusKm * 1000,
+    color:'#005f8e', fillColor:'#005f8e',
+    fillOpacity:.05, weight:1.5, dashArray:'6 4'
+  }).addTo(map);
+
+  if (!sites.length) {
+    count.textContent = 'No results';
+    sub.textContent   = 'Try a longer time or different mode';
+    list.innerHTML    = '<div class="state-box"><span>🏜️</span><span>No bathing waters found nearby</span></div>';
+    return;
+  }
+
+  count.textContent = sites.length + ' bathing site' + (sites.length>1?'s':'') + ' found';
+  sub.textContent   = 'Within ~' + radiusKm.toFixed(0) + ' km · ' + hours + ' hr ' + mode;
+
+  list.innerHTML = '';
+  const bounds = [[userLL.lat, userLL.lng]];
+
+  sites.forEach(site => {
+    bounds.push([site.lat, site.lng]);
+
+    // Map marker
+    const mk = L.marker([site.lat, site.lng], { icon: dotIcon(site.classification) })
+      .addTo(map)
+      .bindPopup(
+        '<strong>' + site.name + '</strong>' +
+        '<br>Quality: ' + site.classification +
+        '<br>~' + site.dist.toFixed(1) + ' km · ~' +
+        Math.round(site.dist / KMH[mode] * 60) + ' min ' + mode
+      );
+    markers.push(mk);
+
+    // Sidebar card
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML =
+      '<div class="card-name">' + esc(site.name) + '</div>' +
+      '<div class="card-meta">' +
+        '<span class="badge ' + badgeCls(site.classification) + '">' + site.classification + '</span>' +
+        '<span>~' + site.dist.toFixed(1) + ' km</span>' +
+        '<span>~' + Math.round(site.dist / KMH[mode] * 60) + ' min</span>' +
+      '</div>';
+
+    card.addEventListener('click', () => {
+      if (activeCard) activeCard.classList.remove('active');
+      card.classList.add('active');
+      activeCard = card;
+      map.setView([site.lat, site.lng], 13, { animate: true });
+      mk.openPopup();
+    });
+    list.appendChild(card);
+  });
+
+  map.fitBounds(bounds, { padding:[40,40], maxZoom:12 });
+}
+
+function esc(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Search ───────────────────────────────────────────────────────────────────
+async function search() {
+  const raw = document.getElementById('locInput').value.trim();
+  if (!raw && !userLL) { alert('Enter a location or click Locate Me first.'); return; }
+
+  const list = document.getElementById('resList');
+  const btn  = document.getElementById('searchBtn');
+  btn.disabled = true;
+
+  try {
+    // Geocode text input if provided
+    if (raw) {
+      setStatus('Geocoding…');
+      userLL = await geocode(raw);
+      placeUserPin();
+    }
+
+    // Load site data once
+    if (!sitesReady) {
+      setStatus('Loading bathing water data…');
+      allSites   = await loadSites();
+      sitesReady = true;
+    }
+
+    setStatus('Filtering…');
+
+    const radiusKm = KMH[mode] * hours;
+    const nearby = allSites
+      .map(s => ({ ...s, dist: distKm(userLL, s) }))
+      .filter(s => s.dist <= radiusKm)
+      .sort((a,b) => a.dist - b.dist);
+
+    render(nearby);
+  } catch(e) {
+    document.getElementById('resList').innerHTML =
+      '<div class="state-box"><span>❌</span><span>' + esc(e.message) + '</span></div>';
+    document.getElementById('resCount').textContent = 'Error';
+    document.getElementById('resSub').textContent   = '';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function setStatus(msg) {
+  document.getElementById('resList').innerHTML =
+    '<div class="state-box"><div class="spinner"></div><span>' + msg + '</span></div>';
+}
+
+function placeUserPin() {
+  if (userPin) map.removeLayer(userPin);
+  userPin = L.marker([userLL.lat, userLL.lng], { icon: userIcon(), zIndexOffset: 1000 })
+    .addTo(map).bindPopup('📍 Your location').openPopup();
+  map.setView([userLL.lat, userLL.lng], 10);
+}
+
+// ── Controls ─────────────────────────────────────────────────────────────────
+document.getElementById('searchBtn').addEventListener('click', search);
+document.getElementById('locInput').addEventListener('keydown', e => e.key==='Enter' && search());
+
+document.getElementById('locateBtn').addEventListener('click', () => {
+  if (!navigator.geolocation) { alert('Geolocation not supported by your browser.'); return; }
+  const btn = document.getElementById('locateBtn');
+  btn.textContent = '⏳ Locating…';
+  btn.disabled    = true;
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      userLL = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+      document.getElementById('locInput').value = '';
+      placeUserPin();
+      btn.textContent = '📍 Locate me';
+      btn.disabled    = false;
+      search();
+    },
+    () => {
+      btn.textContent = '📍 Locate me';
+      btn.disabled    = false;
+      alert('Could not get your location. Please enter it manually.');
+    }
+  );
+});
+
+document.querySelectorAll('.pill').forEach(p => {
+  p.addEventListener('click', () => {
+    document.querySelectorAll('.pill').forEach(x => x.classList.remove('on'));
+    p.classList.add('on');
+    mode = p.dataset.mode;
+  });
+});
+
+document.getElementById('timeSlider').addEventListener('input', e => {
+  hours = parseFloat(e.target.value);
+  document.getElementById('timeVal').textContent =
+    hours + ' hr' + (hours !== 1 ? 's' : '');
+});
+
+// Pre-fetch data silently in the background
+loadSites().then(s => { allSites = s; sitesReady = true; }).catch(() => {});
+</script>
+</body>
+</html>
