@@ -112,7 +112,7 @@
     .btn-reset:hover { background: #fef2f2; color: #c62828; border-color: #f5c6cb; }
 
     /* mode pills */
-    .pills { display: flex; gap: .35rem; }
+    .pills { display: flex; gap: .35rem; flex-wrap: wrap; }
     .pill {
       padding: .4rem .85rem;
       border: 2px solid var(--border);
@@ -122,6 +122,13 @@
       font-size: .86rem;
     }
     .pill.on { border-color: var(--blue); background: var(--surf); color: var(--blue); }
+
+    /* quality-specific pill active colours */
+    .pill[data-quality="Excellent"].on { border-color:#2e7d32; background:#e8f5e9; color:#2e7d32; }
+    .pill[data-quality="Good"].on      { border-color:#1565c0; background:#e3f2fd; color:#1565c0; }
+    .pill[data-quality="Sufficient"].on{ border-color:#e65100; background:#fff8e1; color:#e65100; }
+    .pill[data-quality="Poor"].on      { border-color:#c62828; background:#fce4ec; color:#c62828; }
+    .pill[data-quality="Unknown"].on   { border-color:#666;    background:#f3f3f3; color:#555;    }
 
     /* slider */
     .slider-row { display: flex; align-items: center; gap: .6rem; }
@@ -275,6 +282,17 @@
     </div>
   </div>
 
+  <div class="cg">
+    <label>Water Quality <span style="font-weight:400;text-transform:none;letter-spacing:0">(pick any)</span></label>
+    <div class="pills" id="qualityPills">
+      <button class="pill on" data-quality="Excellent">🟢 Excellent</button>
+      <button class="pill on" data-quality="Good">🔵 Good</button>
+      <button class="pill on" data-quality="Sufficient">🟠 Sufficient</button>
+      <button class="pill on" data-quality="Poor">🔴 Poor</button>
+      <button class="pill on" data-quality="Unknown">⚪ Unknown</button>
+    </div>
+  </div>
+
   <button class="btn-search" id="searchBtn">Search →</button>
   <button class="btn-reset"  id="resetBtn"  title="Clear results">✕ Reset</button>
   <span class="note">🚶🚲 Road-routed · 🚂 Train is crow-flies (no free rail routing API) · <label style="cursor:pointer"><input type="checkbox" id="stravaToggle" style="margin-right:.3rem">🔥 Strava swim heatmap</label></span>
@@ -332,23 +350,47 @@ const MODES = {
 const OSRM = 'https://router.project-osrm.org';
 
 // ── State ────────────────────────────────────────────────────────────────────
-let allSites      = [];
-let sitesReady    = false;
-let userLL        = null;
-let selectedModes = new Set(['cycling']); // multi-select
-let hours         = 1.5;
-let markers       = [];
-let userPin       = null;
-let ring          = null;
-let activeCard    = null;
+let allSites         = [];
+let sitesReady       = false;
+let userLL           = null;
+let selectedModes    = new Set(['cycling']);
+let selectedQualities= new Set(['Excellent','Good','Sufficient','Poor','Unknown']);
+let hours            = 1.5;
+let markers          = [];         // search-result markers
+let allSiteMarkers   = [];         // background "show all" markers
+let lastSearchResults= null;       // cached results pre-quality-filter
+let userPin          = null;
+let ring             = null;
+let activeCard       = null;
 
-// ── Load bundled bathing water data (464 EA-designated sites, England) ───────
+// ── Load bundled bathing water data ──────────────────────────────────────────
 async function loadSites() {
   const res = await fetch('./sites.json');
   if (!res.ok) throw new Error('Could not load site data (' + res.status + ')');
   const raw = await res.json();
-  // Stored compactly: { n: name, lat, lng, c: classification, t: type }
-  return raw.map(s => ({ name: s.n, lat: s.lat, lng: s.lng, classification: s.c, type: s.t }));
+  return raw.map(s => ({ name: s.n, lat: s.lat, lng: s.lng, classification: s.c, type: s.t, src: s.s || 'EA' }));
+}
+
+// ── Show all sites on map (background layer, no search active) ───────────────
+function showAllSites() {
+  allSiteMarkers.forEach(m => map.removeLayer(m));
+  allSiteMarkers = [];
+  const filtered = allSites.filter(s => selectedQualities.has(s.classification));
+  filtered.forEach(site => {
+    const mk = L.circleMarker([site.lat, site.lng], {
+      radius: 5,
+      color: '#fff', weight: 1.5,
+      fillColor: DOT_COLOR[site.classification] || '#555',
+      fillOpacity: 0.85,
+    }).addTo(map).bindPopup(makePopup(site, null));
+    allSiteMarkers.push(mk);
+  });
+  document.getElementById('resCount').textContent = filtered.length + ' bathing sites';
+  document.getElementById('resSub').textContent   =
+    (selectedQualities.size < 5 ? 'Filtered · ' : '') +
+    allSites.length + ' total · enter a location to filter by travel time';
+  document.getElementById('resList').innerHTML =
+    '<div class="state-box"><span>🗺️</span><span>Enter a location to search by travel time</span></div>';
 }
 
 // ── Geocode (Nominatim) ──────────────────────────────────────────────────────
@@ -417,58 +459,71 @@ function badgeCls(c) {
   return { Excellent:'bE', Good:'bG', Sufficient:'bS', Poor:'bP' }[c] || 'bU';
 }
 
-// ── Render ───────────────────────────────────────────────────────────────────
-// sites: [{name, lat, lng, classification, dist, modeTimes: {walking:secs, cycling:secs, …}}]
+// ── Popup HTML ────────────────────────────────────────────────────────────────
+function makePopup(site, travelLine) {
+  const mapsUrl = 'https://www.google.com/maps/dir/?api=1&destination=' + site.lat + ',' + site.lng;
+  return '<strong>' + esc(site.name) + '</strong>' +
+    '<br><span class="badge ' + badgeCls(site.classification) + '" style="display:inline-block;margin:.2rem 0">' + site.classification + '</span>' +
+    (travelLine ? '<br>' + travelLine : '') +
+    '<br><a href="' + mapsUrl + '" target="_blank" rel="noopener" style="font-size:.82rem;color:#005f8e">🗺 Get directions</a>';
+}
+
+// ── Render search results (respects quality filter) ───────────────────────────
 function render(sites) {
+  // Hide the all-sites background layer
+  allSiteMarkers.forEach(m => map.removeLayer(m));
+
   markers.forEach(m => map.removeLayer(m));
   markers = [];
   if (ring) { map.removeLayer(ring); ring = null; }
   activeCard = null;
 
+  // Apply quality filter
+  const visible = sites.filter(s => selectedQualities.has(s.classification));
+
   const list  = document.getElementById('resList');
   const count = document.getElementById('resCount');
   const sub   = document.getElementById('resSub');
 
-  if (!sites.length) {
+  const modeNames = [...selectedModes].map(m => MODES[m].emoji + ' ' + MODES[m].label).join(', ');
+  const filteredNote = visible.length < sites.length
+    ? ' (' + (sites.length - visible.length) + ' hidden by quality filter)' : '';
+
+  if (!visible.length) {
     count.textContent = 'No results';
-    sub.textContent   = 'Try a longer time or different mode';
-    list.innerHTML    = '<div class="state-box"><span>🏜️</span><span>No bathing waters found nearby</span></div>';
+    sub.textContent   = sites.length
+      ? 'All ' + sites.length + ' nearby sites hidden by quality filter'
+      : 'Try a longer time or different mode';
+    list.innerHTML    = '<div class="state-box"><span>🏜️</span><span>No sites match the quality filter</span></div>';
     return;
   }
 
-  const modeNames = [...selectedModes].map(m => MODES[m].emoji + ' ' + MODES[m].label).join(', ');
-  count.textContent = sites.length + ' bathing site' + (sites.length !== 1 ? 's' : '') + ' found';
+  count.textContent = visible.length + ' site' + (visible.length !== 1 ? 's' : '') + ' found' + filteredNote;
   sub.textContent   = hours + ' hr · ' + modeNames;
 
   list.innerHTML = '';
   const bounds = [[userLL.lat, userLL.lng]];
 
-  sites.forEach(site => {
+  visible.forEach(site => {
     bounds.push([site.lat, site.lng]);
 
-    // Build per-mode time chips for the card (only selected modes)
     const modeChips = [...selectedModes].map(mKey => {
       const cfg = MODES[mKey];
       const secs = site.modeTimes[mKey];
       return cfg.emoji + ' ' + (secs != null ? fmtMins(secs) : cfg.routed ? '—' : '~' + Math.round(site.dist / cfg.estKmh * 60) + ' min');
     }).join(' &nbsp;·&nbsp; ');
 
-    // Best time for popup
     const bestMode = [...selectedModes].reduce((best, mKey) => {
       const secs = site.modeTimes[mKey] ?? (site.dist / MODES[mKey].estKmh * 3600);
       return secs < best.secs ? { mKey, secs } : best;
     }, { mKey: null, secs: Infinity });
 
     const distStr = '~' + site.dist.toFixed(1) + ' km';
+    const travelLine = distStr + (bestMode.mKey ? ' · ' + MODES[bestMode.mKey].emoji + ' ' + fmtMins(bestMode.secs) : '');
 
     const mk = L.marker([site.lat, site.lng], { icon: dotIcon(site.classification) })
       .addTo(map)
-      .bindPopup(
-        '<strong>' + esc(site.name) + '</strong>' +
-        '<br>Quality: ' + site.classification +
-        '<br>' + distStr +
-        (bestMode.mKey ? ' · ' + MODES[bestMode.mKey].emoji + ' ' + fmtMins(bestMode.secs) : '')
-      );
+      .bindPopup(makePopup(site, travelLine));
     markers.push(mk);
 
     const card = document.createElement('div');
@@ -576,6 +631,7 @@ async function search() {
       .filter(s => s.bestSecs <= maxSecs)
       .sort((a, b) => a.bestSecs - b.bestSecs);
 
+    lastSearchResults = nearby;
     render(nearby);
   } catch(e) {
     document.getElementById('resList').innerHTML =
@@ -649,30 +705,44 @@ document.getElementById('timeSlider').addEventListener('input', e => {
 
 // ── Reset ─────────────────────────────────────────────────────────────────────
 document.getElementById('resetBtn').addEventListener('click', () => {
-  // Clear markers + ring
   markers.forEach(m => map.removeLayer(m));
   markers = [];
   if (ring) { map.removeLayer(ring); ring = null; }
   if (userPin) { map.removeLayer(userPin); userPin = null; }
   activeCard = null;
   userLL = null;
+  lastSearchResults = null;
 
-  // Reset controls
   document.getElementById('locInput').value = '';
-  document.getElementById('resCount').textContent = 'Results';
-  document.getElementById('resSub').textContent = allSites.length
-    ? allSites.length + ' sites loaded — enter a location to search'
-    : 'Enter a location above to get started';
-  document.getElementById('resList').innerHTML =
-    '<div class="state-box"><span>🗺️</span><span>Search to find bathing waters</span></div>';
   map.setView([54, -3], 6);
+
+  if (sitesReady) showAllSites();
+});
+
+// ── Quality filter pills ──────────────────────────────────────────────────────
+document.getElementById('qualityPills').querySelectorAll('.pill').forEach(p => {
+  p.addEventListener('click', () => {
+    const q = p.dataset.quality;
+    if (selectedQualities.has(q)) {
+      if (selectedQualities.size > 1) { selectedQualities.delete(q); p.classList.remove('on'); }
+    } else {
+      selectedQualities.add(q); p.classList.add('on');
+    }
+    // Re-apply to current view without re-routing
+    if (lastSearchResults) {
+      render(lastSearchResults);
+    } else if (sitesReady) {
+      showAllSites();
+    }
+  });
 });
 
 // Pre-load data on page start
 loadSites().then(s => {
   allSites   = s;
   sitesReady = true;
-  document.getElementById('resSub').textContent = s.length + ' sites loaded — enter a location to search';
+  showAllSites();
+  map.setView([54.5, -3.5], 6);
 }).catch(() => {});
 </script>
 </body>
