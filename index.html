@@ -464,6 +464,57 @@ async function routeByTrain(origin, candidates, maxSecs, onProgress) {
   });
 }
 
+// ── Sea-surface temperature (Open-Meteo Marine API) ──────────────────────────
+const tempCache = {};   // key: "lat1:lng1" (1 dp) → °C or null
+
+async function fetchSST(lat, lng) {
+  const key = lat.toFixed(1) + ':' + lng.toFixed(1);
+  if (key in tempCache) return tempCache[key];
+  try {
+    const url = 'https://marine-api.open-meteo.com/v1/marine?latitude=' + lat +
+      '&longitude=' + lng + '&current=sea_surface_temperature';
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(res.status);
+    const json = await res.json();
+    const t = json?.current?.sea_surface_temperature;
+    tempCache[key] = t != null ? Math.round(t * 10) / 10 : null;
+  } catch(e) {
+    tempCache[key] = null;
+  }
+  return tempCache[key];
+}
+
+function isCoastal(site) {
+  return site.type !== 'InlandBathingWater' && site.type !== 'LakeBathingWater';
+}
+
+function sstColour(t) {
+  if (t == null) return '#888';
+  if (t < 12)   return '#4fc3f7'; // cold
+  if (t < 16)   return '#29b6f6'; // cool
+  if (t < 20)   return '#26a69a'; // mild
+  return '#ff7043';               // warm
+}
+
+// Inject temperature into an open popup once the async fetch completes
+map.on('popupopen', async e => {
+  const marker = e.popup._source;
+  if (!marker || !marker._site) return;
+  const site = marker._site;
+  if (!isCoastal(site)) return;
+
+  const t = await fetchSST(site.lat, site.lng);
+  const el = e.popup.getElement()?.querySelector('.sst-val');
+  if (!el) return;
+  if (t != null) {
+    el.textContent = t + '°C';
+    el.style.color = sstColour(t);
+  } else {
+    el.textContent = 'n/a';
+    el.style.color = '#aaa';
+  }
+});
+
 // ── Show all sites on map (background layer, no search active) ───────────────
 function showAllSites() {
   allSiteMarkers.forEach(m => map.removeLayer(m));
@@ -476,6 +527,7 @@ function showAllSites() {
       fillColor: DOT_COLOR[site.classification] || '#555',
       fillOpacity: 0.85,
     }).addTo(map).bindPopup(makePopup(site, null));
+    mk._site = site;
     allSiteMarkers.push(mk);
   });
   document.getElementById('resCount').textContent = filtered.length + ' bathing sites';
@@ -555,9 +607,13 @@ function badgeCls(c) {
 // ── Popup HTML ────────────────────────────────────────────────────────────────
 function makePopup(site, travelLine) {
   const mapsUrl = 'https://www.google.com/maps/dir/?api=1&destination=' + site.lat + ',' + site.lng;
+  const sstLine = isCoastal(site)
+    ? '<br>🌊 <span class="sst-val" style="font-weight:600;color:#888">…</span>'
+    : '';
   return '<strong>' + esc(site.name) + '</strong>' +
     '<br><span class="badge ' + badgeCls(site.classification) + '" style="display:inline-block;margin:.2rem 0">' + site.classification + '</span>' +
     (travelLine ? '<br>' + travelLine : '') +
+    sstLine +
     '<br><a href="' + mapsUrl + '" target="_blank" rel="noopener" style="font-size:.82rem;color:#005f8e">🗺 Get directions</a>';
 }
 
@@ -619,6 +675,7 @@ function render(sites) {
     const mk = L.marker([site.lat, site.lng], { icon: dotIcon(site.classification) })
       .addTo(map)
       .bindPopup(makePopup(site, travelLine));
+    mk._site = site;
     markers.push(mk);
 
     const card = document.createElement('div');
