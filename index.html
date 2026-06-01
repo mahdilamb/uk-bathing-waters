@@ -708,6 +708,7 @@ function badgeCls(c) {
 // ── Popup HTML ────────────────────────────────────────────────────────────────
 function makePopup(site, travelLine) {
   const mapsUrl = 'https://www.google.com/maps/dir/?api=1&destination=' + site.lat + ',' + site.lng;
+  const wowUrl  = 'https://www.wildopenwater.com/map?lat=' + site.lat + '&lng=' + site.lng + '&z=15';
   const showTemp = isCoastal(site) || isHampsteadPond(site);
   const tempLabel = isHampsteadPond(site) ? '🌡' : '🌊';
   const sstLine = showTemp
@@ -717,7 +718,8 @@ function makePopup(site, travelLine) {
     '<br><span class="badge ' + badgeCls(site.classification) + '" style="display:inline-block;margin:.2rem 0">' + site.classification + '</span>' +
     (travelLine ? '<br>' + travelLine : '') +
     sstLine +
-    '<br><a href="' + mapsUrl + '" target="_blank" rel="noopener" style="font-size:.82rem;color:#005f8e">🗺 Get directions</a>';
+    '<br><a href="' + mapsUrl + '" target="_blank" rel="noopener" style="font-size:.82rem;color:#005f8e">🗺 Get directions</a>' +
+    ' &nbsp; <a href="' + wowUrl + '" target="_blank" rel="noopener" style="font-size:.82rem;color:#1a6b3a">🏊 Wild Open Water</a>';
 }
 
 // ── Render search results (respects quality filter) ───────────────────────────
