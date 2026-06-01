@@ -122,6 +122,13 @@
       font-size: .86rem;
     }
     .pill.on { border-color: var(--blue); background: var(--surf); color: var(--blue); }
+    .pill:disabled { opacity: .4; cursor: not-allowed; }
+
+    /* temperature comfort pill active colours */
+    .pill[data-temp="cold"].on        { border-color:#4fc3f7; background:#e1f5fe; color:#0277bd; }
+    .pill[data-temp="brisk"].on       { border-color:#29b6f6; background:#e1f5fe; color:#0288d1; }
+    .pill[data-temp="comfortable"].on { border-color:#26a69a; background:#e0f2f1; color:#00695c; }
+    .pill[data-temp="warm"].on        { border-color:#ff7043; background:#fbe9e7; color:#bf360c; }
 
     /* quality-specific pill active colours */
     .pill[data-quality="Excellent"].on { border-color:#2e7d32; background:#e8f5e9; color:#2e7d32; }
@@ -293,6 +300,17 @@
     </div>
   </div>
 
+  <div class="cg">
+    <label>Water Temp <span style="font-weight:400;text-transform:none;letter-spacing:0">(search first)</span></label>
+    <div class="pills" id="tempPills">
+      <button class="pill on"  data-temp="any">Any</button>
+      <button class="pill" data-temp="cold">🥶 &lt;12°C</button>
+      <button class="pill" data-temp="brisk">🌊 12–16°C</button>
+      <button class="pill" data-temp="comfortable">😊 16–20°C</button>
+      <button class="pill" data-temp="warm">☀️ &gt;20°C</button>
+    </div>
+  </div>
+
   <button class="btn-search" id="searchBtn">Search →</button>
   <button class="btn-reset"  id="resetBtn"  title="Clear results">✕ Reset</button>
   <span class="note">🚶🚲 Road-routed via OSRM · 🚂 Live train times via Huxley2/National Rail</span>
@@ -341,6 +359,15 @@ let markers          = [];         // search-result markers
 const trainCache     = {};         // key: "FROM:TO" → journey minutes (null = no service)
 let allSiteMarkers   = [];         // background "show all" markers
 let lastSearchResults= null;       // cached results pre-quality-filter
+let selectedTempFilter = 'any';    // temperature comfort filter
+
+const TEMP_RANGES = {
+  any:         { min: -Infinity, max: Infinity  },
+  cold:        { min: -Infinity, max: 12        },
+  brisk:       { min: 12,        max: 16        },
+  comfortable: { min: 16,        max: 20        },
+  warm:        { min: 20,        max: Infinity  },
+};
 let userPin          = null;
 let ring             = null;
 let activeCard       = null;
@@ -501,6 +528,20 @@ async function fetchSST(lat, lng) {
     sstCache[key] = null;
   }
   return sstCache[key];
+}
+
+// ── Batch-fetch water temperatures for search results ────────────────────────
+async function batchFetchTemps(sites) {
+  await Promise.all(sites.map(async site => {
+    if (isHampsteadPond(site)) {
+      const result = await fetchPondTemp();
+      site.waterTemp = result?.temp ?? null;
+    } else if (isCoastal(site)) {
+      site.waterTemp = await fetchSST(site.lat, site.lng);
+    } else {
+      site.waterTemp = null; // inland, no data
+    }
+  }));
 }
 
 // ── Hampstead Heath pond temperature (nw3weather.co.uk via AllOrigins) ───────
@@ -733,7 +774,16 @@ function render(sites) {
   activeCard = null;
 
   // Apply quality filter
-  const visible = sites.filter(s => selectedQualities.has(s.classification));
+  const qualFiltered = sites.filter(s => selectedQualities.has(s.classification));
+
+  // Apply temperature comfort filter (skip if 'any' or no temp data available)
+  const range   = TEMP_RANGES[selectedTempFilter];
+  const noTemps = qualFiltered.every(s => s.waterTemp == null);
+  const visible = (selectedTempFilter === 'any' || noTemps)
+    ? qualFiltered
+    : qualFiltered.filter(s =>
+        s.waterTemp != null && s.waterTemp >= range.min && s.waterTemp < range.max
+      );
 
   const list  = document.getElementById('resList');
   const count = document.getElementById('resCount');
@@ -783,12 +833,18 @@ function render(sites) {
     mk._site = site;
     markers.push(mk);
 
+    const tempChip = site.waterTemp != null
+      ? '<span style="color:' + tempColour(site.waterTemp) + ';font-weight:600">' +
+        (isCoastal(site) ? '🌊' : '🌡') + ' ' + site.waterTemp + '°C</span>'
+      : '';
+
     const card = document.createElement('div');
     card.className = 'card';
     card.innerHTML =
       '<div class="card-name">' + esc(site.name) + '</div>' +
       '<div class="card-meta">' +
         '<span class="badge ' + badgeCls(site.classification) + '">' + site.classification + '</span>' +
+        (tempChip ? '<span>' + tempChip + '</span>' : '') +
         '<span>' + distStr + '</span>' +
         '<span style="margin-left:auto">' + modeChips + '</span>' +
       '</div>';
@@ -895,7 +951,12 @@ async function search() {
       .filter(s => s.bestSecs <= maxSecs)
       .sort((a, b) => a.bestSecs - b.bestSecs);
 
+    // Pre-fetch temperatures for all results (uses cache — fast on repeat searches)
+    setStatus('Fetching water temperatures…');
+    await batchFetchTemps(nearby);
+
     lastSearchResults = nearby;
+    setTempPillsEnabled(true);
     render(nearby);
   } catch(e) {
     document.getElementById('resList').innerHTML =
@@ -978,6 +1039,11 @@ document.getElementById('resetBtn').addEventListener('click', () => {
   lastSearchResults = null;
 
   document.getElementById('locInput').value = '';
+  selectedTempFilter = 'any';
+  document.getElementById('tempPills').querySelectorAll('.pill').forEach(p => {
+    p.classList.toggle('on', p.dataset.temp === 'any');
+  });
+  setTempPillsEnabled(false);
   map.setView([54, -3], 6);
 
   if (sitesReady) showAllSites();
@@ -992,14 +1058,30 @@ document.getElementById('qualityPills').querySelectorAll('.pill').forEach(p => {
     } else {
       selectedQualities.add(q); p.classList.add('on');
     }
-    // Re-apply to current view without re-routing
-    if (lastSearchResults) {
-      render(lastSearchResults);
-    } else if (sitesReady) {
-      showAllSites();
-    }
+    if (lastSearchResults) render(lastSearchResults);
+    else if (sitesReady) showAllSites();
   });
 });
+
+// ── Temperature comfort filter pills ─────────────────────────────────────────
+function setTempPillsEnabled(enabled) {
+  document.getElementById('tempPills').querySelectorAll('.pill').forEach(p => {
+    p.disabled = !enabled;
+  });
+}
+
+document.getElementById('tempPills').querySelectorAll('.pill').forEach(p => {
+  p.addEventListener('click', () => {
+    if (p.disabled) return;
+    selectedTempFilter = p.dataset.temp;
+    document.getElementById('tempPills').querySelectorAll('.pill').forEach(x => x.classList.remove('on'));
+    p.classList.add('on');
+    if (lastSearchResults) render(lastSearchResults);
+  });
+});
+
+// Temp pills disabled until a search is run
+setTempPillsEnabled(false);
 
 // Pre-load sites + stations on page start
 Promise.all([
