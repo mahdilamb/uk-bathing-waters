@@ -331,6 +331,7 @@ const HUXLEY  = 'https://huxley2.azurewebsites.net';
 // ── State ────────────────────────────────────────────────────────────────────
 let allSites         = [];
 let stationsData     = [];         // UK railway stations with CRS codes
+let pondTemp         = null;       // Hampstead Heath pond temp from nw3weather.co.uk
 let sitesReady       = false;
 let userLL           = null;
 let selectedModes    = new Set(['cycling']);
@@ -464,12 +465,30 @@ async function routeByTrain(origin, candidates, maxSecs, onProgress) {
   });
 }
 
+// ── Temperature helpers ───────────────────────────────────────────────────────
+function isCoastal(site) {
+  return site.type !== 'InlandBathingWater' && site.type !== 'LakeBathingWater';
+}
+
+function isHampsteadPond(site) {
+  const n = site.name.toLowerCase();
+  return n.includes('hampstead') && n.includes('pond');
+}
+
+function tempColour(t) {
+  if (t == null) return '#888';
+  if (t < 12)   return '#4fc3f7';
+  if (t < 16)   return '#29b6f6';
+  if (t < 20)   return '#26a69a';
+  return '#ff7043';
+}
+
 // ── Sea-surface temperature (Open-Meteo Marine API) ──────────────────────────
-const tempCache = {};   // key: "lat1:lng1" (1 dp) → °C or null
+const sstCache = {};   // key: "lat1:lng1" → °C or null
 
 async function fetchSST(lat, lng) {
   const key = lat.toFixed(1) + ':' + lng.toFixed(1);
-  if (key in tempCache) return tempCache[key];
+  if (key in sstCache) return sstCache[key];
   try {
     const url = 'https://marine-api.open-meteo.com/v1/marine?latitude=' + lat +
       '&longitude=' + lng + '&current=sea_surface_temperature';
@@ -477,41 +496,123 @@ async function fetchSST(lat, lng) {
     if (!res.ok) throw new Error(res.status);
     const json = await res.json();
     const t = json?.current?.sea_surface_temperature;
-    tempCache[key] = t != null ? Math.round(t * 10) / 10 : null;
+    sstCache[key] = t != null ? Math.round(t * 10) / 10 : null;
   } catch(e) {
-    tempCache[key] = null;
+    sstCache[key] = null;
   }
-  return tempCache[key];
+  return sstCache[key];
 }
 
-function isCoastal(site) {
-  return site.type !== 'InlandBathingWater' && site.type !== 'LakeBathingWater';
+// ── Hampstead Heath pond temperature (nw3weather.co.uk via AllOrigins) ───────
+// Cached in localStorage for 12 hours — no backend needed.
+const POND_LS_KEY = 'pondTempCache';
+const POND_TTL    = 12 * 3600 * 1000; // ms
+
+// Returns { temp, readingDate: Date } or null
+function parsePondHtml(html) {
+  const now   = new Date();
+  const month = now.getMonth() + 1; // 1–12
+  const year  = now.getFullYear();
+  const readings = {}; // { month: { day: temp } }
+
+  const rowRe = /<tr[^>]*>([\s\S]*?)<\/tr>/g;
+  let rm;
+  while ((rm = rowRe.exec(html)) !== null) {
+    const cells = [];
+    const cr = /<td[^>]*>([\s\S]*?)<\/td>/g;
+    let cm;
+    while ((cm = cr.exec(rm[1])) !== null) {
+      cells.push(cm[1].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, '').trim());
+    }
+    if (!cells.length || !/^\d+$/.test(cells[0]) || cells.length < 13) continue;
+    const day = parseInt(cells[0]);
+    for (let m = 1; m <= 12; m++) {
+      const v = parseFloat(cells[m]);
+      if (!isNaN(v)) { (readings[m] = readings[m] || {})[day] = v; }
+    }
+  }
+
+  for (const m of [month, month - 1]) {
+    if (!readings[m] || !Object.keys(readings[m]).length) continue;
+    const lastDay = Math.max(...Object.keys(readings[m]).map(Number));
+    const temp    = readings[m][lastDay];
+    // Build the actual date of the reading (handle Jan/prev-year edge case)
+    const readingYear = (m < 1) ? year - 1 : year;
+    const readingMonth = m < 1 ? 12 : m;
+    const readingDate = new Date(readingYear, readingMonth - 1, lastDay);
+    return { temp, readingDate };
+  }
+  return null;
 }
 
-function sstColour(t) {
-  if (t == null) return '#888';
-  if (t < 12)   return '#4fc3f7'; // cold
-  if (t < 16)   return '#29b6f6'; // cool
-  if (t < 20)   return '#26a69a'; // mild
-  return '#ff7043';               // warm
+function pondRecencyLabel(readingDate) {
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const readingStart = new Date(readingDate);
+  readingStart.setHours(0, 0, 0, 0);
+  const daysAgo = Math.round((todayStart - readingStart) / 86400000);
+  if (daysAgo === 0) return 'today';
+  if (daysAgo === 1) return 'yesterday';
+  if (daysAgo <= 3) return daysAgo + ' days ago';
+  return null; // too stale — don't show
 }
 
-// Inject temperature into an open popup once the async fetch completes
+async function fetchPondTemp() {
+  // Return cached value if fresh (12 hrs)
+  try {
+    const raw = JSON.parse(localStorage.getItem(POND_LS_KEY) || 'null');
+    if (raw && Date.now() - raw.ts < POND_TTL) {
+      return raw.result; // { temp, readingDate: ISO string }
+    }
+  } catch(e) {}
+
+  // Fetch via AllOrigins CORS proxy
+  try {
+    const target = 'https://nw3weather.co.uk/wxdataday.php?vartype=pond';
+    const url    = 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(target);
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(res.status);
+    const html   = await res.text();
+    const parsed = parsePondHtml(html);
+    const result = parsed
+      ? { temp: parsed.temp, readingDate: parsed.readingDate.toISOString() }
+      : null;
+    localStorage.setItem(POND_LS_KEY, JSON.stringify({ result, ts: Date.now() }));
+    return result;
+  } catch(e) {
+    return null;
+  }
+}
+
+// ── Popup temperature injection (on popup open) ───────────────────────────────
 map.on('popupopen', async e => {
   const marker = e.popup._source;
   if (!marker || !marker._site) return;
   const site = marker._site;
-  if (!isCoastal(site)) return;
 
-  const t = await fetchSST(site.lat, site.lng);
+  const hasSst  = isCoastal(site) && !isHampsteadPond(site);
+  const hasPond = isHampsteadPond(site);
+  if (!hasSst && !hasPond) return;
+
   const el = e.popup.getElement()?.querySelector('.sst-val');
   if (!el) return;
-  if (t != null) {
-    el.textContent = t + '°C';
-    el.style.color = sstColour(t);
+
+  if (hasPond) {
+    const result = await fetchPondTemp();
+    if (!result) { el.textContent = 'n/a'; el.style.color = '#aaa'; return; }
+    const label = pondRecencyLabel(new Date(result.readingDate));
+    if (!label) { el.textContent = 'n/a'; el.style.color = '#aaa'; return; }
+    el.textContent = result.temp + '°C (' + label + ')';
+    el.style.color = tempColour(result.temp);
   } else {
-    el.textContent = 'n/a';
-    el.style.color = '#aaa';
+    const t = await fetchSST(site.lat, site.lng);
+    if (t != null) {
+      el.textContent = t + '°C';
+      el.style.color = tempColour(t);
+    } else {
+      el.textContent = 'n/a';
+      el.style.color = '#aaa';
+    }
   }
 });
 
@@ -607,8 +708,10 @@ function badgeCls(c) {
 // ── Popup HTML ────────────────────────────────────────────────────────────────
 function makePopup(site, travelLine) {
   const mapsUrl = 'https://www.google.com/maps/dir/?api=1&destination=' + site.lat + ',' + site.lng;
-  const sstLine = isCoastal(site)
-    ? '<br>🌊 <span class="sst-val" style="font-weight:600;color:#888">…</span>'
+  const showTemp = isCoastal(site) || isHampsteadPond(site);
+  const tempLabel = isHampsteadPond(site) ? '🌡' : '🌊';
+  const sstLine = showTemp
+    ? '<br>' + tempLabel + ' <span class="sst-val" style="font-weight:600;color:#888">…</span>'
     : '';
   return '<strong>' + esc(site.name) + '</strong>' +
     '<br><span class="badge ' + badgeCls(site.classification) + '" style="display:inline-block;margin:.2rem 0">' + site.classification + '</span>' +
