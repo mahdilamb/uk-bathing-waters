@@ -598,31 +598,38 @@ function pondRecencyLabel(readingDate) {
   return null; // too stale — don't show
 }
 
+let _pondInFlight = null; // deduplicate concurrent calls (e.g. batch-fetch for all 3 ponds)
+
 async function fetchPondTemp() {
   // Return cached value if fresh (12 hrs)
   try {
     const raw = JSON.parse(localStorage.getItem(POND_LS_KEY) || 'null');
-    if (raw && Date.now() - raw.ts < POND_TTL) {
-      return raw.result; // { temp, readingDate: ISO string }
-    }
+    if (raw && Date.now() - raw.ts < POND_TTL) return raw.result;
   } catch(e) {}
 
-  // Fetch via AllOrigins CORS proxy
-  try {
-    const target = 'https://nw3weather.co.uk/wxdataday.php?vartype=pond';
-    const url    = 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(target);
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(res.status);
-    const html   = await res.text();
-    const parsed = parsePondHtml(html);
-    const result = parsed
-      ? { temp: parsed.temp, readingDate: parsed.readingDate.toISOString() }
-      : null;
-    localStorage.setItem(POND_LS_KEY, JSON.stringify({ result, ts: Date.now() }));
-    return result;
-  } catch(e) {
-    return null;
-  }
+  // If a fetch is already in-flight, share it rather than firing 3 parallel requests
+  if (_pondInFlight) return _pondInFlight;
+
+  _pondInFlight = (async () => {
+    try {
+      const target = 'https://nw3weather.co.uk/wxdataday.php?vartype=pond';
+      const url    = 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(target);
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(res.status);
+      const parsed = parsePondHtml(await res.text());
+      const result = parsed
+        ? { temp: parsed.temp, readingDate: parsed.readingDate.toISOString() }
+        : null;
+      localStorage.setItem(POND_LS_KEY, JSON.stringify({ result, ts: Date.now() }));
+      return result;
+    } catch(e) {
+      return null;
+    } finally {
+      _pondInFlight = null;
+    }
+  })();
+
+  return _pondInFlight;
 }
 
 // ── Popup temperature injection (on popup open) ───────────────────────────────
