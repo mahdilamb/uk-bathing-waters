@@ -102,6 +102,15 @@
     }
     .btn-search:hover { background: #004f77; }
     .btn-search:disabled { opacity: .5; cursor: default; }
+    .btn-search.stale {
+      background: #e65100;
+      animation: pulse-stale 1.4s ease-in-out infinite;
+    }
+    .btn-search.stale:hover { background: #bf360c; }
+    @keyframes pulse-stale {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(230,81,0,.5); }
+      50%       { box-shadow: 0 0 0 6px rgba(230,81,0,0); }
+    }
 
     .btn-reset {
       background: #fff;
@@ -352,7 +361,9 @@ L.tileLayer('https://services.arcgisonline.com/ArcGIS/rest/services/Reference/Wo
 // ── Mode config ───────────────────────────────────────────────────────────────
 // osrmProfile: null = crow-flies estimate only; estKmh used for buffer & fallback
 const MODES = {
-  walking: { label: 'Walking', emoji: '🚶', osrmProfile: 'foot',    estKmh:  5, routed: true  },
+  // Note: public OSRM server returns identical times for foot and cycling profiles,
+  // so walking times are derived from cycling by speed ratio (13/5 = 2.6×).
+  walking: { label: 'Walking', emoji: '🚶', osrmProfile: null,      estKmh:  5, routed: false },
   cycling: { label: 'Cycling', emoji: '🚲', osrmProfile: 'cycling', estKmh: 13, routed: true, realisticKmh: 23 },
   train:   { label: 'Train',   emoji: '🚆', osrmProfile: null,      estKmh: 52, routed: true  },
 };
@@ -373,10 +384,11 @@ const trainCache     = {};         // key: "FROM:TO" → journey minutes (null =
 let allSiteMarkers   = [];         // background "show all" markers
 let lastSearchResults= null;       // cached results pre-quality-filter
 let selectedTemps = new Set(['any']); // temperature comfort filter (multi-select)
-let routeLayer      = null;  // currently drawn route polyline
+let routeLayers     = [];    // currently drawn route polylines (one per routed mode)
 let activeRouteSite = null;  // site whose route is pinned (click); null = none
 const routeGeomCache = {};   // key: "profile:lat,lng" → latlngs (avoids re-fetching)
 let _routeToken     = 0;     // incremented by clearRoute() to cancel in-flight draws
+let searchIsStale   = false; // true when form has changed since last search
 
 const TEMP_RANGES = {
   any:         { min: -Infinity, max: Infinity  },
@@ -727,57 +739,81 @@ function distKm(a, b) {
 const ROUTE_STYLE = {
   foot:    { color: '#ff6d00', weight: 5, opacity: 1, dashArray: '8 6' },
   cycling: { color: '#00e5ff', weight: 5, opacity: 1, dashArray: '8 6' },
+  train:   { color: '#e040fb', weight: 3, opacity: 0.8, dashArray: '4 10' }, // straight-line approx
 };
 
 function clearRoute() {
-  ++_routeToken; // invalidate any in-flight drawRoute call
-  if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
+  ++_routeToken;
+  routeLayers.forEach(l => map.removeLayer(l));
+  routeLayers = [];
 }
 
-// hover=true → faded; draw is cancelled if clearRoute() is called before fetch resolves
+// Draw a route for every selected OSRM-capable mode in parallel.
+// hover=true → faded; cancelled if clearRoute() fires before fetch resolves.
 async function drawRoute(site, { hover = false } = {}) {
   clearRoute();
   if (!userLL) return;
 
-  const profile = selectedModes.has('cycling') ? 'cycling'
-    : selectedModes.has('walking') ? 'foot' : null;
-  if (!profile) return;
+  const routableModes = [...selectedModes].filter(mKey => MODES[mKey].osrmProfile);
+  if (!routableModes.length) return;
 
-  const token = _routeToken; // snapshot — if clearRoute fires before we finish, token changes
+  const token = _routeToken;
 
-  const cacheKey = profile + ':' + site.lat + ',' + site.lng;
-  let latlngs = routeGeomCache[cacheKey];
-
-  if (!latlngs) {
-    try {
-      const url = `${OSRM}/route/v1/${profile}/${userLL.lng},${userLL.lat};${site.lng},${site.lat}?overview=full&geometries=geojson`;
-      const res = await fetch(url);
-      if (!res.ok || token !== _routeToken) return; // cancelled
-      const json = await res.json();
-      if (json.code !== 'Ok' || !json.routes.length || token !== _routeToken) return;
-      latlngs = json.routes[0].geometry.coordinates.map(([lng, lat]) => [lat, lng]);
-      routeGeomCache[cacheKey] = latlngs;
-    } catch(e) { return; }
-  }
-
-  if (token !== _routeToken) return; // cancelled while fetching from cache
-
-  const style = Object.assign({}, ROUTE_STYLE[profile] || ROUTE_STYLE.cycling,
-    hover ? { opacity: 0.55, weight: 4 } : {});
-  routeLayer = L.polyline(latlngs, style).addTo(map);
-
-  // Show all selected modes' times in the tooltip
-  const modeLines = [...selectedModes]
+  // Build tooltip string up-front (all selected modes with valid times)
+  const tooltipHtml = [...selectedModes]
     .map(mKey => {
       const secs = site.modeTimes?.[mKey];
-      if (secs == null) return null;
-      return MODES[mKey].emoji + ' ' + fmtMins(secs);
+      return secs != null ? MODES[mKey].emoji + ' ' + fmtMins(secs) : null;
     })
     .filter(Boolean)
     .join(' &nbsp;·&nbsp; ');
-  if (modeLines) {
-    routeLayer.bindTooltip(modeLines, { sticky: true, className: 'route-tip' }).openTooltip();
+
+  // Train: straight line (no routing geometry available)
+  if (selectedModes.has('train') && site.modeTimes?.train != null) {
+    if (token !== _routeToken) return;
+    const layer = L.polyline(
+      [[userLL.lat, userLL.lng], [site.lat, site.lng]],
+      Object.assign({}, ROUTE_STYLE.train, hover ? { opacity: 0.4 } : {})
+    ).addTo(map);
+    routeLayers.push(layer);
   }
+
+  // Fetch + draw all routed modes in parallel
+  await Promise.all(routableModes.map(async mKey => {
+    const cfg     = MODES[mKey];
+    const profile = cfg.osrmProfile;
+
+    // Skip if beyond realistic distance for this mode
+    const maxKm = cfg.realisticKmh ? cfg.realisticKmh * hours : Infinity;
+    if (site.dist > maxKm) return;
+
+    const cacheKey = profile + ':' + site.lat + ',' + site.lng;
+    let latlngs = routeGeomCache[cacheKey];
+
+    if (!latlngs) {
+      try {
+        const url = `${OSRM}/route/v1/${profile}/${userLL.lng},${userLL.lat};${site.lng},${site.lat}?overview=full&geometries=geojson`;
+        const res = await fetch(url);
+        if (!res.ok || token !== _routeToken) return;
+        const json = await res.json();
+        if (json.code !== 'Ok' || !json.routes.length || token !== _routeToken) return;
+        latlngs = json.routes[0].geometry.coordinates.map(([lng, lat]) => [lat, lng]);
+        routeGeomCache[cacheKey] = latlngs;
+      } catch(e) { return; }
+    }
+
+    if (token !== _routeToken) return;
+
+    const style = Object.assign({}, ROUTE_STYLE[profile] || ROUTE_STYLE.cycling,
+      hover ? { opacity: 0.55, weight: 4 } : {});
+    const layer = L.polyline(latlngs, style).addTo(map);
+
+    // Attach tooltip to first layer drawn (avoids duplicates)
+    if (tooltipHtml && routeLayers.length === 0) {
+      layer.bindTooltip(tooltipHtml, { sticky: true, className: 'route-tip' }).openTooltip();
+    }
+    routeLayers.push(layer);
+  }));
 }
 
 // ── OSRM Table API ───────────────────────────────────────────────────────────
@@ -1037,15 +1073,24 @@ async function search() {
 
       for (const { mKey, durations, ok } of osrmResults) {
         const cfg = MODES[mKey];
-        // Sanity-cap: if crow-flies distance exceeds what's realistic in the
-        // given time (OSRM cycling speeds are ~3× too optimistic), treat as null
         const maxRealisticKm = cfg.realisticKmh ? cfg.realisticKmh * hours : Infinity;
         if (site.dist > maxRealisticKm) {
           modeTimes[mKey] = null;
         } else {
           modeTimes[mKey] = ok && durations[i] != null ? durations[i]
-            : site.dist / cfg.estKmh * 3600; // crow-flies fallback
+            : site.dist / cfg.estKmh * 3600;
         }
+      }
+
+      // Walking: public OSRM foot profile returns cycling speeds, so derive
+      // from cycling time by speed ratio, or crow-flies if cycling unavailable.
+      if (selectedModes.has('walking')) {
+        const cycSecs  = modeTimes['cycling'];
+        const RATIO    = MODES.cycling.estKmh / MODES.walking.estKmh; // 13/5 = 2.6
+        const maxWalkKm = MODES.walking.estKmh * hours;
+        modeTimes['walking'] = site.dist > maxWalkKm ? null
+          : cycSecs != null ? cycSecs * RATIO
+          : site.dist / MODES.walking.estKmh * 3600;
       }
 
       if (trainMode) {
@@ -1072,6 +1117,7 @@ async function search() {
 
     lastSearchResults = nearby;
     setTempPillsEnabled(true);
+    clearStale();
     render(nearby);
   } catch(e) {
     document.getElementById('resList').innerHTML =
@@ -1125,15 +1171,11 @@ document.querySelectorAll('.pill[data-mode]').forEach(p => {
   p.addEventListener('click', () => {
     const mKey = p.dataset.mode;
     if (selectedModes.has(mKey)) {
-      // Don't allow deselecting the last mode
-      if (selectedModes.size > 1) {
-        selectedModes.delete(mKey);
-        p.classList.remove('on');
-      }
+      if (selectedModes.size > 1) { selectedModes.delete(mKey); p.classList.remove('on'); }
     } else {
-      selectedModes.add(mKey);
-      p.classList.add('on');
+      selectedModes.add(mKey); p.classList.add('on');
     }
+    markStale();
   });
 });
 
@@ -1141,7 +1183,22 @@ document.getElementById('timeSlider').addEventListener('input', e => {
   hours = parseFloat(e.target.value);
   document.getElementById('timeVal').textContent =
     hours + ' hr' + (hours !== 1 ? 's' : '');
+  markStale();
 });
+
+document.getElementById('locInput').addEventListener('input', markStale);
+
+// ── Stale search indicator ────────────────────────────────────────────────────
+function markStale() {
+  if (!lastSearchResults) return; // no search yet — nothing to be stale
+  searchIsStale = true;
+  document.getElementById('searchBtn').classList.add('stale');
+}
+
+function clearStale() {
+  searchIsStale = false;
+  document.getElementById('searchBtn').classList.remove('stale');
+}
 
 // ── Reset ─────────────────────────────────────────────────────────────────────
 document.getElementById('resetBtn').addEventListener('click', () => {
@@ -1161,6 +1218,7 @@ document.getElementById('resetBtn').addEventListener('click', () => {
     p.classList.toggle('on', p.dataset.temp === 'any');
   });
   setTempPillsEnabled(false);
+  clearStale();
   map.setView([54, -3], 6);
 
   if (sitesReady) showAllSites();
