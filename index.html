@@ -766,15 +766,17 @@ async function drawRoute(site, { hover = false } = {}) {
     hover ? { opacity: 0.55, weight: 4 } : {});
   routeLayer = L.polyline(latlngs, style).addTo(map);
 
-  // Show the fastest mode across all selected modes, not just the routed one
-  const bestEntry = [...selectedModes]
-    .map(mKey => ({ mKey, secs: site.modeTimes?.[mKey] }))
-    .filter(e => e.secs != null)
-    .reduce((best, e) => (!best || e.secs < best.secs) ? e : best, null);
-  if (bestEntry) {
-    routeLayer.bindTooltip(MODES[bestEntry.mKey].emoji + ' ' + fmtMins(bestEntry.secs), {
-      sticky: true, className: 'route-tip'
-    }).openTooltip();
+  // Show all selected modes' times in the tooltip
+  const modeLines = [...selectedModes]
+    .map(mKey => {
+      const secs = site.modeTimes?.[mKey];
+      if (secs == null) return null;
+      return MODES[mKey].emoji + ' ' + fmtMins(secs);
+    })
+    .filter(Boolean)
+    .join(' &nbsp;·&nbsp; ');
+  if (modeLines) {
+    routeLayer.bindTooltip(modeLines, { sticky: true, className: 'route-tip' }).openTooltip();
   }
 }
 
