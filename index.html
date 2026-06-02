@@ -313,7 +313,7 @@
 
   <button class="btn-search" id="searchBtn">Search →</button>
   <button class="btn-reset"  id="resetBtn"  title="Clear results">✕ Reset</button>
-  <span class="note">🚶🚲 Road-routed via OSRM · 🚂 Live train times via Huxley2/National Rail</span>
+  <span class="note">🚶🚲 Road-routed via OSRM · 🚂 Live train times via Huxley2/National Rail · <label style="cursor:pointer"><input type="checkbox" id="showRoutes" style="margin-right:.3rem">Show route on map</label></span>
 </div>
 
 <div class="main">
@@ -332,8 +332,18 @@
 <script>
 // ── Map ──────────────────────────────────────────────────────────────────────
 const map = L.map('map').setView([52.5, -1.8], 6);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors | Bathing water data © EA / NRW / SEPA'
+
+// Satellite base layer (ESRI World Imagery — free, no key)
+L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+  attribution: 'Tiles © Esri &mdash; Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, GIS User Community | Bathing water data © EA / NRW / SEPA',
+  maxZoom: 18
+}).addTo(map);
+
+// Place-name / road label overlay on top of satellite
+L.tileLayer('https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', {
+  attribution: '',
+  maxZoom: 18,
+  opacity: 0.8
 }).addTo(map);
 
 // ── Mode config ───────────────────────────────────────────────────────────────
@@ -360,6 +370,7 @@ const trainCache     = {};         // key: "FROM:TO" → journey minutes (null =
 let allSiteMarkers   = [];         // background "show all" markers
 let lastSearchResults= null;       // cached results pre-quality-filter
 let selectedTemps = new Set(['any']); // temperature comfort filter (multi-select)
+let routeLayer    = null;             // currently drawn route polyline
 
 const TEMP_RANGES = {
   any:         { min: -Infinity, max: Infinity  },
@@ -706,6 +717,33 @@ function distKm(a, b) {
   return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1-x));
 }
 
+// ── OSRM Route API (for drawing routes on map) ───────────────────────────────
+const ROUTE_STYLE = {
+  foot:    { color: '#ff7043', weight: 4, opacity: 0.8, dashArray: '6 5' },
+  cycling: { color: '#005f8e', weight: 4, opacity: 0.8, dashArray: '6 5' },
+};
+
+async function drawRoute(site) {
+  if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
+  if (!userLL || !document.getElementById('showRoutes').checked) return;
+
+  // Pick best routed mode (cycling > walking; skip train — no geometry available)
+  const profile = selectedModes.has('cycling') ? 'cycling'
+    : selectedModes.has('walking') ? 'foot' : null;
+  if (!profile) return;
+
+  try {
+    const url = `${OSRM}/route/v1/${profile}/${userLL.lng},${userLL.lat};${site.lng},${site.lat}?overview=full&geometries=geojson`;
+    const res  = await fetch(url);
+    if (!res.ok) return;
+    const json = await res.json();
+    if (json.code !== 'Ok' || !json.routes.length) return;
+    routeLayer = L.geoJSON(json.routes[0].geometry, {
+      style: ROUTE_STYLE[profile] || ROUTE_STYLE.cycling
+    }).addTo(map);
+  } catch(e) { /* silent fail */ }
+}
+
 // ── OSRM Table API ───────────────────────────────────────────────────────────
 // Returns duration in seconds for each destination (null = unreachable).
 async function osrmTimes(profile, origin, destinations) {
@@ -866,6 +904,7 @@ function render(sites) {
       activeCard = card;
       map.setView([site.lat, site.lng], 13, { animate: true });
       mk.openPopup();
+      drawRoute(site);
     });
     list.appendChild(card);
   });
@@ -1043,8 +1082,9 @@ document.getElementById('timeSlider').addEventListener('input', e => {
 document.getElementById('resetBtn').addEventListener('click', () => {
   markers.forEach(m => map.removeLayer(m));
   markers = [];
-  if (ring) { map.removeLayer(ring); ring = null; }
-  if (userPin) { map.removeLayer(userPin); userPin = null; }
+  if (ring)        { map.removeLayer(ring);        ring = null;        }
+  if (userPin)     { map.removeLayer(userPin);     userPin = null;     }
+  if (routeLayer)  { map.removeLayer(routeLayer);  routeLayer = null;  }
   activeCard = null;
   userLL = null;
   lastSearchResults = null;
@@ -1072,6 +1112,11 @@ document.getElementById('qualityPills').querySelectorAll('.pill').forEach(p => {
     if (lastSearchResults) render(lastSearchResults);
     else if (sitesReady) showAllSites();
   });
+});
+
+// ── Show routes toggle ────────────────────────────────────────────────────────
+document.getElementById('showRoutes').addEventListener('change', function() {
+  if (!this.checked && routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
 });
 
 // ── Temperature comfort filter pills ─────────────────────────────────────────
