@@ -214,6 +214,9 @@
 
     /* ── Map ── */
     #map { width: 100%; height: 100%; }
+    .route-tip { background:#1a1a2e; color:#fff; border:none; font-size:.82rem;
+                 font-weight:600; padding:.25rem .55rem; border-radius:5px;
+                 box-shadow:0 2px 6px rgba(0,0,0,.4); white-space:nowrap; }
 
     /* ── States ── */
     .state-box {
@@ -277,7 +280,7 @@
     <div class="pills">
       <button class="pill"     data-mode="walking">🚶 Walking</button>
       <button class="pill on"  data-mode="cycling">🚲 Cycling</button>
-      <button class="pill"     data-mode="train">🚂 Train</button>
+      <button class="pill"     data-mode="train">🚆 Train</button>
     </div>
   </div>
 
@@ -313,7 +316,7 @@
 
   <button class="btn-search" id="searchBtn">Search →</button>
   <button class="btn-reset"  id="resetBtn"  title="Clear results">✕ Reset</button>
-  <span class="note">🚶🚲 Road-routed via OSRM · 🚂 Live train times via Huxley2/National Rail · <label style="cursor:pointer"><input type="checkbox" id="showRoutes" style="margin-right:.3rem">Show route on map</label></span>
+  <span class="note">🚶🚲 Road-routed via OSRM · 🚆 Live train times via Huxley2/National Rail</span>
 </div>
 
 <div class="main">
@@ -350,8 +353,8 @@ L.tileLayer('https://services.arcgisonline.com/ArcGIS/rest/services/Reference/Wo
 // osrmProfile: null = crow-flies estimate only; estKmh used for buffer & fallback
 const MODES = {
   walking: { label: 'Walking', emoji: '🚶', osrmProfile: 'foot',    estKmh:  5, routed: true  },
-  cycling: { label: 'Cycling', emoji: '🚲', osrmProfile: 'cycling', estKmh: 13, routed: true  },
-  train:   { label: 'Train',   emoji: '🚂', osrmProfile: null,      estKmh: 52, routed: true  },
+  cycling: { label: 'Cycling', emoji: '🚲', osrmProfile: 'cycling', estKmh: 13, routed: true, realisticKmh: 23 },
+  train:   { label: 'Train',   emoji: '🚆', osrmProfile: null,      estKmh: 52, routed: true  },
 };
 const OSRM    = 'https://router.project-osrm.org';
 const HUXLEY  = 'https://huxley2.azurewebsites.net';
@@ -370,7 +373,10 @@ const trainCache     = {};         // key: "FROM:TO" → journey minutes (null =
 let allSiteMarkers   = [];         // background "show all" markers
 let lastSearchResults= null;       // cached results pre-quality-filter
 let selectedTemps = new Set(['any']); // temperature comfort filter (multi-select)
-let routeLayer    = null;             // currently drawn route polyline
+let routeLayer      = null;  // currently drawn route polyline
+let activeRouteSite = null;  // site whose route is pinned (click); null = none
+const routeGeomCache = {};   // key: "profile:lat,lng" → latlngs (avoids re-fetching)
+let _routeToken     = 0;     // incremented by clearRoute() to cancel in-flight draws
 
 const TEMP_RANGES = {
   any:         { min: -Infinity, max: Infinity  },
@@ -723,25 +729,53 @@ const ROUTE_STYLE = {
   cycling: { color: '#00e5ff', weight: 5, opacity: 1, dashArray: '8 6' },
 };
 
-async function drawRoute(site) {
+function clearRoute() {
+  ++_routeToken; // invalidate any in-flight drawRoute call
   if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
-  if (!userLL || !document.getElementById('showRoutes').checked) return;
+}
 
-  // Pick best routed mode (cycling > walking; skip train — no geometry available)
+// hover=true → faded; draw is cancelled if clearRoute() is called before fetch resolves
+async function drawRoute(site, { hover = false } = {}) {
+  clearRoute();
+  if (!userLL) return;
+
   const profile = selectedModes.has('cycling') ? 'cycling'
     : selectedModes.has('walking') ? 'foot' : null;
   if (!profile) return;
 
-  try {
-    const url = `${OSRM}/route/v1/${profile}/${userLL.lng},${userLL.lat};${site.lng},${site.lat}?overview=full&geometries=geojson`;
-    const res  = await fetch(url);
-    if (!res.ok) return;
-    const json = await res.json();
-    if (json.code !== 'Ok' || !json.routes.length) return;
-    // Convert GeoJSON [lng,lat] coords → Leaflet [lat,lng] and draw as polyline
-    const latlngs = json.routes[0].geometry.coordinates.map(([lng, lat]) => [lat, lng]);
-    routeLayer = L.polyline(latlngs, ROUTE_STYLE[profile]).addTo(map);
-  } catch(e) { /* silent fail */ }
+  const token = _routeToken; // snapshot — if clearRoute fires before we finish, token changes
+
+  const cacheKey = profile + ':' + site.lat + ',' + site.lng;
+  let latlngs = routeGeomCache[cacheKey];
+
+  if (!latlngs) {
+    try {
+      const url = `${OSRM}/route/v1/${profile}/${userLL.lng},${userLL.lat};${site.lng},${site.lat}?overview=full&geometries=geojson`;
+      const res = await fetch(url);
+      if (!res.ok || token !== _routeToken) return; // cancelled
+      const json = await res.json();
+      if (json.code !== 'Ok' || !json.routes.length || token !== _routeToken) return;
+      latlngs = json.routes[0].geometry.coordinates.map(([lng, lat]) => [lat, lng]);
+      routeGeomCache[cacheKey] = latlngs;
+    } catch(e) { return; }
+  }
+
+  if (token !== _routeToken) return; // cancelled while fetching from cache
+
+  const style = Object.assign({}, ROUTE_STYLE[profile] || ROUTE_STYLE.cycling,
+    hover ? { opacity: 0.55, weight: 4 } : {});
+  routeLayer = L.polyline(latlngs, style).addTo(map);
+
+  // Show the fastest mode across all selected modes, not just the routed one
+  const bestEntry = [...selectedModes]
+    .map(mKey => ({ mKey, secs: site.modeTimes?.[mKey] }))
+    .filter(e => e.secs != null)
+    .reduce((best, e) => (!best || e.secs < best.secs) ? e : best, null);
+  if (bestEntry) {
+    routeLayer.bindTooltip(MODES[bestEntry.mKey].emoji + ' ' + fmtMins(bestEntry.secs), {
+      sticky: true, className: 'route-tip'
+    }).openTooltip();
+  }
 }
 
 // ── OSRM Table API ───────────────────────────────────────────────────────────
@@ -816,7 +850,9 @@ function render(sites) {
   markers.forEach(m => map.removeLayer(m));
   markers = [];
   if (ring) { map.removeLayer(ring); ring = null; }
-  activeCard = null;
+  clearRoute();
+  activeCard      = null;
+  activeRouteSite = null;
 
   // Apply quality filter
   const qualFiltered = sites.filter(s => selectedQualities.has(s.classification));
@@ -880,11 +916,22 @@ function render(sites) {
       .addTo(map)
       .bindPopup(makePopup(site, travelLine));
     mk._site = site;
+    mk.on('mouseover', () => { if (activeRouteSite !== site) drawRoute(site, { hover: true }); });
+    mk.on('mouseout',  () => {
+      if (activeRouteSite && activeRouteSite !== site) drawRoute(activeRouteSite);
+      else if (!activeRouteSite) clearRoute();
+    });
     markers.push(mk);
 
+    function tempRangeEmoji(t) {
+      if (t < 12) return '🥶';
+      if (t < 16) return '🌊';
+      if (t < 20) return '😊';
+      return '☀️';
+    }
     const tempChip = site.waterTemp != null
       ? '<span style="color:' + tempColour(site.waterTemp) + ';font-weight:600">' +
-        (isCoastal(site) ? '🌊' : '🌡') + ' ' + site.waterTemp + '°C</span>'
+        tempRangeEmoji(site.waterTemp) + ' ' + site.waterTemp + '°C</span>'
       : '';
 
     const card = document.createElement('div');
@@ -898,10 +945,18 @@ function render(sites) {
         '<span style="margin-left:auto">' + modeChips + '</span>' +
       '</div>';
 
+    card.addEventListener('mouseenter', () => {
+      if (activeRouteSite !== site) drawRoute(site, { hover: true });
+    });
+    card.addEventListener('mouseleave', () => {
+      if (activeRouteSite && activeRouteSite !== site) drawRoute(activeRouteSite);
+      else if (!activeRouteSite) clearRoute();
+    });
     card.addEventListener('click', () => {
       if (activeCard) activeCard.classList.remove('active');
       card.classList.add('active');
       activeCard = card;
+      activeRouteSite = site;
       map.setView([site.lat, site.lng], 13, { animate: true });
       mk.openPopup();
       drawRoute(site);
@@ -968,9 +1023,9 @@ async function search() {
     // ── Huxley2 train routing ─────────────────────────────────────────────────
     let trainAnnotated = candidates.map(s => ({ ...s, trainSecs: null, trainNote: null }));
     if (trainMode) {
-      setStatus('🚂 Finding train times… (checking ' + candidates.length + ' sites)');
+      setStatus('🚆 Finding train times… (checking ' + candidates.length + ' sites)');
       trainAnnotated = await routeByTrain(userLL, candidates, maxSecs, (done, total) => {
-        setStatus('🚂 Train routing: ' + done + '/' + total + ' station pairs…');
+        setStatus('🚆 Train routing: ' + done + '/' + total + ' station pairs…');
       });
     }
 
@@ -979,8 +1034,16 @@ async function search() {
       const modeTimes = {};
 
       for (const { mKey, durations, ok } of osrmResults) {
-        modeTimes[mKey] = ok && durations[i] != null ? durations[i]
-          : site.dist / MODES[mKey].estKmh * 3600; // crow-flies fallback
+        const cfg = MODES[mKey];
+        // Sanity-cap: if crow-flies distance exceeds what's realistic in the
+        // given time (OSRM cycling speeds are ~3× too optimistic), treat as null
+        const maxRealisticKm = cfg.realisticKmh ? cfg.realisticKmh * hours : Infinity;
+        if (site.dist > maxRealisticKm) {
+          modeTimes[mKey] = null;
+        } else {
+          modeTimes[mKey] = ok && durations[i] != null ? durations[i]
+            : site.dist / cfg.estKmh * 3600; // crow-flies fallback
+        }
       }
 
       if (trainMode) {
@@ -1084,10 +1147,11 @@ document.getElementById('resetBtn').addEventListener('click', () => {
   markers = [];
   if (ring)        { map.removeLayer(ring);        ring = null;        }
   if (userPin)     { map.removeLayer(userPin);     userPin = null;     }
-  if (routeLayer)  { map.removeLayer(routeLayer);  routeLayer = null;  }
-  activeCard = null;
-  userLL = null;
-  lastSearchResults = null;
+  clearRoute();
+  activeCard       = null;
+  activeRouteSite  = null;
+  userLL           = null;
+  lastSearchResults= null;
 
   document.getElementById('locInput').value = '';
   selectedTemps = new Set(['any']);
@@ -1112,11 +1176,6 @@ document.getElementById('qualityPills').querySelectorAll('.pill').forEach(p => {
     if (lastSearchResults) render(lastSearchResults);
     else if (sitesReady) showAllSites();
   });
-});
-
-// ── Show routes toggle ────────────────────────────────────────────────────────
-document.getElementById('showRoutes').addEventListener('change', function() {
-  if (!this.checked && routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
 });
 
 // ── Temperature comfort filter pills ─────────────────────────────────────────
