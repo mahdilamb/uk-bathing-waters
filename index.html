@@ -359,7 +359,7 @@ let markers          = [];         // search-result markers
 const trainCache     = {};         // key: "FROM:TO" → journey minutes (null = no service)
 let allSiteMarkers   = [];         // background "show all" markers
 let lastSearchResults= null;       // cached results pre-quality-filter
-let selectedTempFilter = 'any';    // temperature comfort filter
+let selectedTemps = new Set(['any']); // temperature comfort filter (multi-select)
 
 const TEMP_RANGES = {
   any:         { min: -Infinity, max: Infinity  },
@@ -783,14 +783,18 @@ function render(sites) {
   // Apply quality filter
   const qualFiltered = sites.filter(s => selectedQualities.has(s.classification));
 
-  // Apply temperature comfort filter (skip if 'any' or no temp data available)
-  const range   = TEMP_RANGES[selectedTempFilter];
-  const noTemps = qualFiltered.every(s => s.waterTemp == null);
-  const visible = (selectedTempFilter === 'any' || noTemps)
+  // Apply temperature comfort filter
+  const noTemps  = qualFiltered.every(s => s.waterTemp == null);
+  const tempAny  = selectedTemps.has('any');
+  const visible  = (tempAny || noTemps)
     ? qualFiltered
-    : qualFiltered.filter(s =>
-        s.waterTemp != null && s.waterTemp >= range.min && s.waterTemp < range.max
-      );
+    : qualFiltered.filter(s => {
+        if (s.waterTemp == null) return false;
+        return [...selectedTemps].some(k => {
+          const r = TEMP_RANGES[k];
+          return s.waterTemp >= r.min && s.waterTemp < r.max;
+        });
+      });
 
   const list  = document.getElementById('resList');
   const count = document.getElementById('resCount');
@@ -1046,7 +1050,7 @@ document.getElementById('resetBtn').addEventListener('click', () => {
   lastSearchResults = null;
 
   document.getElementById('locInput').value = '';
-  selectedTempFilter = 'any';
+  selectedTemps = new Set(['any']);
   document.getElementById('tempPills').querySelectorAll('.pill').forEach(p => {
     p.classList.toggle('on', p.dataset.temp === 'any');
   });
@@ -1080,9 +1084,23 @@ function setTempPillsEnabled(enabled) {
 document.getElementById('tempPills').querySelectorAll('.pill').forEach(p => {
   p.addEventListener('click', () => {
     if (p.disabled) return;
-    selectedTempFilter = p.dataset.temp;
-    document.getElementById('tempPills').querySelectorAll('.pill').forEach(x => x.classList.remove('on'));
-    p.classList.add('on');
+    const t = p.dataset.temp;
+    if (t === 'any') {
+      // "Any" clears all range selections
+      selectedTemps = new Set(['any']);
+    } else {
+      selectedTemps.delete('any');
+      if (selectedTemps.has(t)) {
+        selectedTemps.delete(t);
+        if (selectedTemps.size === 0) selectedTemps.add('any'); // revert if nothing left
+      } else {
+        selectedTemps.add(t);
+      }
+    }
+    // Sync pill states
+    document.getElementById('tempPills').querySelectorAll('.pill').forEach(x => {
+      x.classList.toggle('on', selectedTemps.has(x.dataset.temp));
+    });
     if (lastSearchResults) render(lastSearchResults);
   });
 });
