@@ -719,8 +719,8 @@ function distKm(a, b) {
 
 // ── OSRM Route API (for drawing routes on map) ───────────────────────────────
 const ROUTE_STYLE = {
-  foot:    { color: '#ff7043', weight: 4, opacity: 0.8, dashArray: '6 5' },
-  cycling: { color: '#005f8e', weight: 4, opacity: 0.8, dashArray: '6 5' },
+  foot:    { color: '#ff6d00', weight: 5, opacity: 1, dashArray: '8 6' },
+  cycling: { color: '#00e5ff', weight: 5, opacity: 1, dashArray: '8 6' },
 };
 
 async function drawRoute(site) {
@@ -738,9 +738,9 @@ async function drawRoute(site) {
     if (!res.ok) return;
     const json = await res.json();
     if (json.code !== 'Ok' || !json.routes.length) return;
-    routeLayer = L.geoJSON(json.routes[0].geometry, {
-      style: ROUTE_STYLE[profile] || ROUTE_STYLE.cycling
-    }).addTo(map);
+    // Convert GeoJSON [lng,lat] coords → Leaflet [lat,lng] and draw as polyline
+    const latlngs = json.routes[0].geometry.coordinates.map(([lng, lat]) => [lat, lng]);
+    routeLayer = L.polyline(latlngs, ROUTE_STYLE[profile]).addTo(map);
   } catch(e) { /* silent fail */ }
 }
 
