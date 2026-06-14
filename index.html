@@ -261,10 +261,20 @@
     }
 
     @media (max-width: 700px) {
-      .main { grid-template-columns: 1fr; grid-template-rows: 55% 45%; }
+      header { padding: 0.45rem 1rem; gap: 0.5rem; }
+      header h1 { font-size: 1rem; white-space: nowrap; }
+      header p  { display: none; }
+
+      .controls { padding: 0.45rem 0.85rem; gap: 0.4rem 1rem; }
+      .cg { gap: 0.2rem; }
+      .pill { padding: .32rem .7rem; font-size: .82rem; }
+      .btn-search, .btn-reset { padding: .42rem .9rem; }
+      .note { font-size: .7rem; }
+
+      .main { grid-template-columns: 1fr; grid-template-rows: 58% 42%; }
       .sidebar { border-right: none; border-top: 1px solid var(--border); order: 2; }
       #map { order: 1; }
-      input[type="text"] { width: 190px; }
+      input[type="text"] { width: 170px; }
     }
   </style>
 </head>
@@ -851,10 +861,10 @@ function dotIcon(c) {
 
 function userIcon() {
   return L.divIcon({
-    html: `<div style="width:17px;height:17px;border-radius:50%;
-             background:#005f8e;border:3px solid #fff;
-             box-shadow:0 2px 6px rgba(0,0,0,.5)"></div>`,
-    className:'', iconSize:[17,17], iconAnchor:[8.5,8.5]
+    html: '<div style="font-size:26px;line-height:1;filter:drop-shadow(0 2px 4px rgba(0,0,0,.6))">📍</div>',
+    className: '',
+    iconSize:   [26, 26],
+    iconAnchor: [7, 26],   // tip of pin at anchor point
   });
 }
 
